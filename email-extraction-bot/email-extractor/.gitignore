@@ -1,0 +1,73 @@
+# Environment and config
+.env
+config/.env
+*.env
+config/.env.example
+
+# UID Tracking (contains email addresses)
+last_run*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Test outputs
+test_results_*.json
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (large files)
+models/*.pkl
+models/*.pt
+models/*.bin
+
+# Spacy
+*.vectors
+
+# Database backups
+*.sql.backup
+*.db
+
+# ============================================================================
+# Documentation/Guide Files (Don't commit)
+# ============================================================================
+COMPLETE_SUMMARY.md
+DEPLOYMENT_READY.md
+FINAL_FIXES_APPLIED.md
+FINAL_SETUP_GUIDE.md
+FIXES_SUMMARY.md
+QUICK_START.md
+SCHEMA_FIXES.md
+STATUS_REPORT.txt
+TESTING_GUIDE.md
+TEST_GUIDE.md
+UID_TRACKING_GUIDE.md
+VALIDATION_CHANGES.md
+START_HERE.md
+
+# Setup files
+complete_setup.sql
+setup_job_type.sql
+validate_setup.py
+test_my_account.py
+test_improvements.py
+test_my_account_fixed.py
+*.DS_Store
