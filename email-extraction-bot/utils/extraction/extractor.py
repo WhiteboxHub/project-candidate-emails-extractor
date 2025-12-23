@@ -504,7 +504,7 @@ class ContactExtractor:
             if domain in personal_domains:
                 self.logger.debug(f"✗ Blocked personal email domain: {email}")
                 return True
-        except:
+        except:  # noqa: E722
             pass
         
         return False

@@ -19,6 +19,7 @@ ENV/
 
 # Test outputs
 test_results_*.json
+results.json
 
 # Logs
 *.log

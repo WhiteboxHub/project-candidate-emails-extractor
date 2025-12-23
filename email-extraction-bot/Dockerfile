@@ -13,8 +13,8 @@ RUN python -m spacy download en_core_web_sm
 COPY . .
 
 # Default environment variables
-ENV ENV_MODE=test
-# ENV ENV_MODE=service
+# ENV ENV_MODE=test
+ENV ENV_MODE=service
 # Entrypoint script to choose between test or service
 ENTRYPOINT ["sh", "-c"]
 CMD ["if [ \"$ENV_MODE\" = 'test' ]; then python test_my_account.py; else python service.py; fi"]
