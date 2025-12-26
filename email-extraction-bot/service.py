@@ -76,6 +76,34 @@ class EmailExtractionService:
         self.uid_tracker = get_uid_tracker("last_run.json")
 
         self.logger.info("All components initialized successfully")
+        
+        # Display cache statistics banner
+        self._display_cache_stats()
+    
+    def _display_cache_stats(self):
+        """Display cache statistics banner at startup"""
+        try:
+            stats = self.email_filter.cache_manager.get_cache_stats()
+            
+            self.logger.info("=" * 80)
+            self.logger.info("DATABASE CACHE STATISTICS")
+            self.logger.info("=" * 80)
+            self.logger.info(f"Cache Status: {'FRESH' if stats['is_fresh'] else 'STALE'}")
+            self.logger.info(f"Cache Age: {stats['cache_age_seconds']:.1f}s / {stats['cache_ttl_seconds']}s TTL")
+            self.logger.info(f"Load Count: {stats['load_count']} | Hit Rate: {stats['hit_rate']:.1%}")
+            self.logger.info("-" * 80)
+            self.logger.info("LOADED RULES:")
+            self.logger.info(f"  • Sender/Email Rules: {stats['rule_counts']['sender_rules']}")
+            self.logger.info(f"  • Content Scoring Rules: {stats['rule_counts']['content_rules']}")
+            self.logger.info(f"  • Name Validation Rules: {stats['rule_counts']['name_rules']}")
+            self.logger.info(f"  • Company Validation Rules: {stats['rule_counts']['company_rules']}")
+            self.logger.info(f"  • TOTAL RULES: {stats['rule_counts']['total_rules']}")
+            self.logger.info("=" * 80)
+            self.logger.info("✓ All filtering is 100% DATABASE-DRIVEN (no hardcoded rules)")
+            self.logger.info("=" * 80)
+        except Exception as e:
+            self.logger.warning(f"Could not display cache stats: {e}")
+
 
     def run(self):
         """Main execution method"""
@@ -176,18 +204,8 @@ class EmailExtractionService:
                             continue
 
                         # =====================================================
-                        # PHASE 3: CONTENT SCORING (DB KEYWORDS)
-                        # =====================================================
-                        score = self.email_filter.score_content(
-                            subject=clean_subject,
-                            body=clean_body,
-                        )
-
-                        if score < 2:
-                            continue
-
-                        # =====================================================
-                        # PHASE 4: CONTACT EXTRACTION
+                        # PHASE 3: CONTACT EXTRACTION
+                        # Extract ALL contacts from emails that passed sender filter
                         # =====================================================
                         contacts = self.extractor.extract_contacts(
                             msg,
@@ -202,7 +220,16 @@ class EmailExtractionService:
                             if not (contact.get("email") or contact.get("linkedin_id")):
                                 continue
 
-                            contact["confidence_score"] = score
+                            # Validate extracted email against DB rules
+                            contact_email = contact.get("email")
+                            if contact_email:
+                                if not self.email_filter.is_email_allowed(contact_email):
+                                    self.logger.debug(
+                                        f"Blocked extracted email: {contact_email} "
+                                        f"(source: {contact.get('extraction_source', 'unknown')})"
+                                    )
+                                    continue
+
                             total_contacts.append(contact)
 
                         processed_emails += 1

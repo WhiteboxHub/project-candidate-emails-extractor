@@ -159,14 +159,19 @@ class EmailFilter:
                 # Check exact match against full email, domain, or local part
                 if email_lower == kw or domain == kw or local_part == kw:
                     return True
-            elif rule["match_type"] == "contains":
-                # Check if keyword is contained in email
-                if isinstance(kw, str) and kw in email_lower:
+                # Also check if keyword is contained in local part (for system emails like "donotreply")
+                # This catches variations like "donotreply", "do-not-reply", etc.
+                if kw in local_part:
                     return True
+            elif rule["match_type"] == "contains":
+                # Check if keyword is contained in email (full email, local part, or domain)
+                if isinstance(kw, str):
+                    if kw in email_lower or kw in local_part or kw in domain:
+                        return True
             elif rule["match_type"] == "regex":
-                # Regex match against full email
+                # Regex match against full email, local part, and domain
                 if isinstance(kw, re.Pattern):
-                    if kw.search(email_lower):
+                    if kw.search(email_lower) or kw.search(local_part) or kw.search(domain):
                         return True
 
         return False
@@ -407,3 +412,141 @@ class EmailFilter:
                         pass
         
         return False
+
+    # --------------------------------------------------
+    # PHONE NUMBER VALIDATION (DB RULES)
+    # --------------------------------------------------
+    def _is_valid_phone(self, phone: str) -> bool:
+        """
+        Validate phone number using DB rules from job_automation_keywords table.
+        Returns True if phone should be allowed, False if blocked.
+        """
+        if not phone or len(phone.strip()) < 7:
+            return False
+        
+        phone_clean = phone.strip()
+        
+        # Check against invalid phone rules from DB
+        for rule in self.email_rules:  # Reuse email_rules since they apply to 'both'
+            if rule['category'].startswith('invalid_phone_'):
+                if self._rule_matches_text(phone_clean, rule):
+                    self.logger.debug(
+                        f"Phone '{phone_clean}' blocked by rule: {rule['category']}"
+                    )
+                    return False
+        
+        # Basic format validation
+        if not phone_clean.startswith('+'):
+            return False
+        
+        # Must have at least 10 digits
+        digits = ''.join(c for c in phone_clean if c.isdigit())
+        if len(digits) < 10:
+            return False
+        
+        return True
+
+    # --------------------------------------------------
+    # LINKEDIN ID VALIDATION (DB RULES)
+    # --------------------------------------------------
+    def _is_valid_linkedin(self, linkedin_id: str) -> bool:
+        """
+        Validate LinkedIn ID using DB rules from job_automation_keywords table.
+        Returns True if LinkedIn ID should be allowed, False if blocked.
+        """
+        if not linkedin_id or len(linkedin_id.strip()) < 3:
+            return False
+        
+        linkedin_clean = linkedin_id.lower().strip()
+        
+        # Check against invalid LinkedIn rules from DB
+        for rule in self.email_rules:  # Reuse email_rules since they apply to 'both'
+            if rule['category'].startswith('invalid_linkedin_'):
+                if self._rule_matches_text(linkedin_clean, rule):
+                    self.logger.debug(
+                        f"LinkedIn ID '{linkedin_clean}' blocked by rule: {rule['category']}"
+                    )
+                    return False
+        
+        # Basic format validation
+        if len(linkedin_id) > 100:
+            return False
+        
+        if linkedin_id.count(' ') >= 3:
+            return False
+        
+        return True
+
+    # --------------------------------------------------
+    # LOCATION VALIDATION (DB RULES)
+    # --------------------------------------------------
+    def _is_valid_location(self, location: str) -> bool:
+        """
+        Validate location using DB rules from job_automation_keywords table.
+        Returns True if location should be allowed, False if blocked.
+        """
+        if not location or len(location.strip()) < 2:
+            return False
+        
+        location_clean = location.lower().strip()
+        
+        # Check against invalid location rules from DB
+        for rule in self.email_rules:  # Reuse email_rules since they apply to 'both'
+            if rule['category'].startswith('invalid_location_'):
+                if self._rule_matches_text(location_clean, rule):
+                    self.logger.debug(
+                        f"Location '{location_clean}' blocked by rule: {rule['category']}"
+                    )
+                    return False
+        
+        # Basic format validation
+        if len(location) > 100:
+            return False
+        
+        if len(location.split()) > 6:
+            return False
+        
+        return True
+
+    # --------------------------------------------------
+    # RULE STATISTICS
+    # --------------------------------------------------
+    def get_rule_statistics(self) -> Dict:
+        """
+        Get statistics about loaded rules for debugging and monitoring.
+        Returns a dictionary with rule counts by category and type.
+        """
+        stats = {
+            'total_sender_rules': len(self.sender_rules),
+            'total_email_rules': len(self.email_rules),
+            'total_content_rules': len(self.content_rules),
+            'total_name_rules': len(self.name_rules),
+            'total_company_rules': len(self.company_rules),
+            'allow_rules': 0,
+            'block_rules': 0,
+            'by_category': {}
+        }
+        
+        # Count all rules
+        all_rules = (
+            self.sender_rules + 
+            self.email_rules + 
+            self.content_rules + 
+            self.name_rules + 
+            self.company_rules
+        )
+        
+        for rule in all_rules:
+            # Count by action
+            if rule['action'] == 'allow':
+                stats['allow_rules'] += 1
+            elif rule['action'] == 'block':
+                stats['block_rules'] += 1
+            
+            # Count by category
+            category = rule['category']
+            if category not in stats['by_category']:
+                stats['by_category'][category] = 0
+            stats['by_category'][category] += 1
+        
+        return stats

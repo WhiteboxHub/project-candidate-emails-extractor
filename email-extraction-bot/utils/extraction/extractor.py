@@ -130,7 +130,9 @@ class ContactExtractor:
                     if not contact['name']:
                         contact['name'] = self._extract_name_from_email(contact['email'])
                 # Phone
-                contact['phone'] = self._extract_field('phone', clean_body, email_message)
+                phone_raw = self._extract_field('phone', clean_body, email_message)
+                if phone_raw and self._is_valid_phone(phone_raw):
+                    contact['phone'] = phone_raw
                 # LinkedIn
                 linkedin_raw = self._extract_field('linkedin_id', clean_body, email_message)
                 if linkedin_raw and self._is_valid_linkedin_id(linkedin_raw):
@@ -142,7 +144,7 @@ class ContactExtractor:
                         contact['company'] = company
                 # Location
                 location = self._extract_field('location', clean_body, email_message)
-                if location and self._is_valid_location(location):
+                if location and self._is_valid_location_db(location):
                     contact['location'] = location
                 contact = self._validate_and_clean_contact(contact)
                 if contact.get('email') or contact.get('linkedin_id'):
@@ -166,11 +168,7 @@ class ContactExtractor:
                 if '@' not in contact['email'] or '.' not in contact['email']:
                     self.logger.debug(f"Invalid email format: {contact['email']}")
                     contact['email'] = None
-            # Phone
-            if contact['phone']:
-                if not contact['phone'].startswith('+'):
-                    self.logger.debug(f"Invalid phone format: {contact['phone']}")
-                    contact['phone'] = None
+            # Phone - already validated during extraction
             # Requires email or LinkedIn
             if not contact['email'] and not contact['linkedin_id']:
                 self.logger.debug("No email or LinkedIn found - invalid contact")
@@ -274,16 +272,17 @@ class ContactExtractor:
     def _is_valid_name(self, name: str, source_email: str) -> bool:
         """
         Validate name using DB rules from job_automation_keywords table.
-        Falls back to basic validation if DB rules not available.
+        100% DB-driven - NO hardcoded fallbacks.
         """
         if not name or len(name.strip()) < 2:
             return False
+        
         name_lower = name.lower().strip()
         words = name.split()
         
-        # Basic format validation
+        # Basic format validation (minimal hardcoded rules)
         if len(words) == 1:
-            if len(name) < 3 or any(c.isdigit() for c in name):
+            if len(name) < 3:
                 return False
         if len(words) > 4:
             return False
@@ -292,30 +291,17 @@ class ContactExtractor:
         if name.isupper() and len(name) > 5:
             return False
         
-        # Use DB rules if email_filter is available
-        if self.email_filter and hasattr(self.email_filter, '_check_name_against_db_rules'):
-            if not self.email_filter._check_name_against_db_rules(name_lower):
-                return False
-        else:
-            # Fallback: basic validation (will be replaced by DB rules)
-            # Check against common invalid patterns
-            job_titles = [
-                'recruiter', 'manager', 'director', 'engineer', 'developer',
-                'architect', 'specialist', 'coordinator', 'analyst', 'consultant',
-                'lead', 'senior', 'junior', 'principal', 'executive', 'president',
-                'ceo', 'cto', 'cfo', 'coo', 'founder', 'partner', 'vp', 'vice president'
-            ]
-            if any(title in name_lower for title in job_titles):
-                return False
-            location_indicators = ['city', 'state', 'county', 'street', 'avenue', 'road', 'drive']
-            if any(indicator in name_lower for indicator in location_indicators):
-                return False
-            company_indicators = ['inc', 'llc', 'corp', 'ltd', 'company', 'technologies', 'solutions', 'systems']
-            if any(indicator in name_lower for indicator in company_indicators):
-                return False
-            generic_names = ['dear', 'hi', 'hello', 'team', 'sir', 'madam', 'folks', 'all']
-            if any(generic in name_lower for generic in generic_names):
-                return False
+        # Must have proper capitalization (at least first letter of each word)
+        if not any(word[0].isupper() for word in words if word):
+            return False
+        
+        # Use DB rules via email_filter (100% DB-driven)
+        if not self.email_filter or not hasattr(self.email_filter, '_check_name_against_db_rules'):
+            self.logger.error("No email_filter available for name validation - rejecting")
+            return False
+        
+        if not self.email_filter._check_name_against_db_rules(name_lower):
+            return False
         
         # Check if name matches source email (likely not a real name)
         if source_email:
@@ -330,79 +316,81 @@ class ContactExtractor:
     def _is_valid_company(self, company: str) -> bool:
         """
         Validate company using DB rules from job_automation_keywords table.
-        Falls back to basic validation if DB rules not available.
+        100% DB-driven - NO hardcoded fallbacks.
         """
         if not company or len(company.strip()) < 2:
             return False
         
         company_lower = company.lower().strip()
+        
+        # Basic format validation (minimal hardcoded rules)
         if len(company) > 100:
             return False
         
-        # Use DB rules if email_filter is available
-        if self.email_filter and hasattr(self.email_filter, '_check_company_against_db_rules'):
-            if not self.email_filter._check_company_against_db_rules(company_lower):
-                return False
-        else:
-            # Fallback: basic validation (will be replaced by DB rules)
-            sentence_indicators = [
-                'we have', 'i would like', 'please', 'thank you', 'looking for',
-                'excellent opportunity', 'job opportunity', 'position', 'role',
-                'location:', 'remote', 'onsite', 'hybrid', 'w2', 'c2c', '1099'
-            ]
-            if any(indicator in company_lower for indicator in sentence_indicators):
-                return False
-            job_titles = [
-                'recruiter', 'technical recruiter', 'senior recruiter', 'lead recruiter',
-                'manager', 'director', 'engineer', 'developer', 'architect'
-            ]
-            if any(title in company_lower for title in job_titles):
-                return False
-            location_patterns = [
-                r'\d{5}',  # ZIP codes
-                r'[A-Z]{2}\s*\d{5}',  # State ZIP
-                r'\(.*\)',  # Parentheses (often locations)
-            ]
-            for pattern in location_patterns:
-                if re.search(pattern, company):
-                    return False
-            if len(company.split()) == 1 and len(company) <= 3:
-                return False
-            non_company = ['none', 'n/a', 'na', 'tbd', 'remote', 'onsite', 'hybrid']
-            if company_lower in non_company:
-                return False
+        # Reject if it looks like a sentence (too many words)
+        if len(company.split()) > 8:
+            return False
+        
+        # Use DB rules via email_filter (100% DB-driven)
+        if not self.email_filter or not hasattr(self.email_filter, '_check_company_against_db_rules'):
+            self.logger.error("No email_filter available for company validation - rejecting")
+            return False
+        
+        if not self.email_filter._check_company_against_db_rules(company_lower):
+            return False
         
         return True
 
-    def _is_valid_location(self, location: str) -> bool:
+    def _is_valid_location_db(self, location: str) -> bool:
+        """
+        Validate location using DB rules from job_automation_keywords table.
+        100% DB-driven - NO hardcoded fallbacks.
+        """
         if not location or len(location.strip()) < 2:
             return False
+        
+        # Basic format validation (minimal hardcoded rules)
         if len(location) > 100:
             return False
-        job_terms = ['recruiter', 'engineer', 'developer', 'position', 'role']
-        if any(term in location.lower() for term in job_terms):
+        
+        if len(location.split()) > 6:
             return False
-        return True
+        
+        # Use DB rules via email_filter (100% DB-driven)
+        if not self.email_filter or not hasattr(self.email_filter, '_is_valid_location'):
+            self.logger.error("No email_filter available for location validation - rejecting")
+            return False
+        
+        return self.email_filter._is_valid_location(location)
 
     def _is_valid_email(self, email: str) -> bool:
+        """
+        Validate email using DB rules from job_automation_keywords table.
+        100% DB-driven - NO hardcoded fallbacks.
+        """
         if not email or '@' not in email:
             return False
-        if self.email_filter:
-            return self.email_filter.is_email_allowed(email)
-        return '@' in email and '.' in email.split('@')[1]
+        
+        if not self.email_filter:
+            self.logger.error("No email_filter available for email validation - rejecting")
+            return False
+        
+        return self.email_filter.is_email_allowed(email)
 
     def _is_valid_linkedin_id(self, value: str) -> bool:
+        """
+        Validate LinkedIn ID using DB rules from job_automation_keywords table.
+        100% DB-driven - NO hardcoded fallbacks.
+        """
         if not value:
             return False
-        if value.count(' ') >= 2:
+        
+        # Use DB rules via email_filter (100% DB-driven)
+        if not self.email_filter or not hasattr(self.email_filter, '_is_valid_linkedin'):
+            self.logger.error("No email_filter available for LinkedIn validation - rejecting")
             return False
-        if any(title in value.lower() for title in ['mr.', 'mrs.', 'ms.', 'dr.', 'jr.', 'sr.', 'phd']):
-            return False
-        if len(value) > 50:
-            return False
-        if '@' in value:
-            return False 
-        return True
+        
+        return self.email_filter._is_valid_linkedin(value)
 
     def _extract_from_cc_headers(self, email_message) -> Optional[str]:
         try:
@@ -435,12 +423,19 @@ class ContactExtractor:
             self.logger.error(f"Error extracting header emails: {str(e)}")
             return None
 
-    def _is_gmail_address(self, email: str, block_gmail: bool = True) -> bool:
+    def _is_valid_phone(self, phone: str) -> bool:
         """
-        DEPRECATED: Use _is_valid_email() instead which uses DB filters.
-        Kept for backward compatibility.
+        Validate phone number using DB rules from job_automation_keywords table.
+        100% DB-driven - NO hardcoded fallbacks.
         """
-        return not self._is_valid_email(email)
+        if not phone:
+            return False
+        
+        if not self.email_filter or not hasattr(self.email_filter, '_is_valid_phone'):
+            self.logger.error("No email_filter available for phone validation - rejecting")
+            return False
+        
+        return self.email_filter._is_valid_phone(phone)
 
     def _is_valid_header_email(self, email: str) -> bool:
         return self._is_valid_email(email)

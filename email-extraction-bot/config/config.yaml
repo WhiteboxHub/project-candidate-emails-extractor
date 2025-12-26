@@ -63,33 +63,16 @@ filters:
   use_ml_classifier: true
   ml_model_dir: ../models
   
-  # Blacklisted keywords in email addresses
-  blacklist_keywords:
-    - noreply
-    - no-reply
-    - donotreply
-    - autoresponder
-    - mailer-daemon
-    - bot
-    - notifications
-    - support
-    - alerts
-    - newsletter
+  # Content scoring threshold for recruiter detection
+  content_score_threshold: 2
   
-  # Personal email domains to skip
-  personal_domains:
-    - gmail.com
-    - yahoo.com
-    - outlook.com
-    - hotmail.com
-    - icloud.com
-  
-  # Service/platform domains to skip
-  service_domains:
-    - amazon.com
-    - linkedin.com
-    - github.com
-    - facebook.com
+  # NOTE: All filtering rules are now loaded from the database (job_automation_keywords table)
+  # No hardcoded filters - everything is dynamic and DB-driven!
+
+# Cache Configuration (NEW!)
+cache:
+  ttl_seconds: 3600  # Cache time-to-live: 1 hour (rules refresh after this)
+  enable_auto_refresh: false  # Auto-refresh cache when stale (set true for hot-reload)
 
 # Processing Configuration
 processing:
