@@ -6,6 +6,7 @@ import re
 from .regex_util import RegexExtractor
 from .ner_util import SpacyNERExtractor
 from .gliner_util import GLiNERExtractor
+from utils.filters.filter_repository import get_filter_repository
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,9 @@ class ContactExtractor:
     def __init__(self, config: dict):
         self.config = config
         self.logger = logging.getLogger(__name__)
+        
+        # Initialize filter repository
+        self.filter_repo = get_filter_repository()
         
         # Initialize extractors based on config
         enabled_methods = config.get('extraction', {}).get('enabled_methods', ['regex', 'spacy'])
@@ -485,27 +489,17 @@ class ContactExtractor:
     
     
     def _is_gmail_address(self, email: str, block_gmail: bool = True) -> bool:
-        """Check if email is from Gmail or other personal domains"""
+        """Check if email is from Gmail or other personal domains using database filters"""
         if not block_gmail:
             return False
         
         if not email or '@' not in email:
             return False
         
-        personal_domains = {
-            'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.co.uk', 'yahoo.in',
-            'outlook.com', 'hotmail.com', 'live.com', 'msn.com',
-            'icloud.com', 'me.com', 'mac.com',
-            'aol.com', 'protonmail.com', 'proton.me', 'pm.me'
-        }
-        
-        try:
-            domain = email.split('@')[1].lower()
-            if domain in personal_domains:
-                self.logger.debug(f"✗ Blocked personal email domain: {email}")
-                return True
-        except:
-            pass
+        action = self.filter_repo.check_email(email)
+        if action == 'block':
+            self.logger.debug(f"✗ Blocked personal email domain: {email}")
+            return True
         
         return False
     

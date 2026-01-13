@@ -43,7 +43,7 @@ def main():
             trackers[filename] = (path, data)
     
     if not trackers:
-        print("\n✅ No tracker files found - system will process all emails on next run")
+        print("\n[OK] No tracker files found - system will process all emails on next run")
         return
     
     print(f"\nFound {len(trackers)} tracker file(s):\n")
@@ -89,7 +89,7 @@ def main():
                 email, filename, path, data = all_emails[idx]
                 del data[email]
                 save_tracker(path, data)
-                print(f"\n✅ Reset {email} in {filename}")
+                print(f"\n[OK] Reset {email} in {filename}")
                 print(f"   Next run will process ALL emails for this account")
             else:
                 print("Invalid choice")
@@ -98,12 +98,12 @@ def main():
     
     elif choice == '2':
         # Reset all
-        confirm = input("\n⚠️  This will reset ALL accounts. Continue? (yes/no): ").strip().lower()
+        confirm = input("\n[WARNING]  This will reset ALL accounts. Continue? (yes/no): ").strip().lower()
         if confirm == 'yes':
             for filename, (path, data) in trackers.items():
                 save_tracker(path, {})
-                print(f"✅ Reset all accounts in {filename}")
-            print("\n✅ All accounts reset - next run will process ALL emails")
+                print(f"[OK] Reset all accounts in {filename}")
+            print("\n[OK] All accounts reset - next run will process ALL emails")
         else:
             print("Cancelled")
     
@@ -119,10 +119,10 @@ def main():
             filename = list(trackers.keys())[idx]
             path = trackers[filename][0]
             
-            confirm = input(f"\n⚠️  Delete {filename}? (yes/no): ").strip().lower()
+            confirm = input(f"\n[WARNING]  Delete {filename}? (yes/no): ").strip().lower()
             if confirm == 'yes':
                 path.unlink()
-                print(f"✅ Deleted {filename}")
+                print(f"[OK] Deleted {filename}")
                 print(f"   Next run will process ALL emails for all accounts")
             else:
                 print("Cancelled")

@@ -2,6 +2,7 @@ import re
 import phonenumbers
 from typing import Optional
 import logging
+from utils.filters.filter_repository import get_filter_repository
 
 logger = logging.getLogger(__name__)
 
@@ -20,28 +21,15 @@ class RegexExtractor:
         )
         
         self.logger = logging.getLogger(__name__)
-        
-        # Personal/consumer email domains to block
-        self.personal_domains = {
-            'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.co.uk', 'yahoo.in',
-            'outlook.com', 'hotmail.com', 'live.com', 'msn.com',
-            'icloud.com', 'me.com', 'mac.com',
-            'aol.com', 'protonmail.com', 'proton.me', 'pm.me',
-            'mail.com', 'zoho.com', 'yandex.com', 'yandex.ru',
-            'gmx.com', 'gmx.net', 'tutanota.com', 'tutanota.de',
-            'fastmail.com', 'hushmail.com', 'mailfence.com'
-        }
+        self.filter_repo = get_filter_repository()
     
     def _is_personal_email(self, email: str) -> bool:
-        """Check if email is from a personal/consumer domain (Gmail, Yahoo, etc.)"""
+        """Check if email is from a personal/consumer domain using database filters"""
         if not email or '@' not in email:
             return True
         
-        try:
-            domain = email.split('@')[1].lower()
-            return domain in self.personal_domains
-        except:
-            return True
+        action = self.filter_repo.check_email(email)
+        return action == 'block'
     
     def _is_valid_email_format(self, email: str) -> bool:
         """Validate email format and filter out CID references and fake emails

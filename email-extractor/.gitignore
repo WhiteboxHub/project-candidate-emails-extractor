@@ -70,4 +70,3 @@ validate_setup.py
 test_my_account.py
 test_improvements.py
 test_my_account_fixed.py
-*.DS_Store

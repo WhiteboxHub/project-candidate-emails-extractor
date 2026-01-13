@@ -63,33 +63,14 @@ filters:
   use_ml_classifier: true
   ml_model_dir: ../models
   
-  # Blacklisted keywords in email addresses
-  blacklist_keywords:
-    - noreply
-    - no-reply
-    - donotreply
-    - autoresponder
-    - mailer-daemon
-    - bot
-    - notifications
-    - support
-    - alerts
-    - newsletter
-  
-  # Personal email domains to skip
-  personal_domains:
-    - gmail.com
-    - yahoo.com
-    - outlook.com
-    - hotmail.com
-    - icloud.com
-  
-  # Service/platform domains to skip
-  service_domains:
-    - amazon.com
-    - linkedin.com
-    - github.com
-    - facebook.com
+  # All filter rules (domains, keywords, patterns) are now managed dynamically
+  # via keywords.csv and loaded from the database through filter_repository.py
+  # This ensures a single source of truth and easy updates without code changes.
+  # 
+  # To add/modify filters:
+  # 1. Update keywords.csv with your filter rules
+  # 2. Import to database via the job_automation_keywords API
+  # 3. Changes take effect immediately on next service restart
 
 # Processing Configuration
 processing:
