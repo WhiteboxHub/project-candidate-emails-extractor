@@ -4,6 +4,8 @@ config/.env
 *.env
 config/.env.example
 
+keywords.csv
+keywords.csv.backup
 # UID Tracking (contains email addresses)
 last_run*.json
 
