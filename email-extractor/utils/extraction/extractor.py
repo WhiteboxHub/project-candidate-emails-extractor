@@ -337,26 +337,26 @@ class ContactExtractor:
             return entities.get('name')
         
         elif field == 'company':
-            # PRIORITY 1: HTML span extraction (already done in extract_contacts before this)
-            # This is the fallback priority system
-            
-            # PRIORITY 2: Signature extraction (look for company after job title)
-            signature_company = self.spacy_extractor.extract_company_from_signature(text)
-            if signature_company:
-                self.logger.debug(f"✓ Extracted company from signature: {signature_company}")
-                return signature_company
-            
-            # PRIORITY 3: Domain extraction from email
+            # Use NEW scoring-based extraction system (CSV-driven, no hardcoded values)
+            # This replaces the old priority system with candidate scoring
             email = kwargs.get('email')
-            if email:
-                company = self.spacy_extractor.extract_company_from_domain(email)
-                if company:
-                    self.logger.debug(f"✓ Extracted company from domain: {company}")
-                    return company
             
-            # PRIORITY 4: NER extraction (lowest confidence, filtered for job titles)
-            entities = self.spacy_extractor.extract_entities(text)
-            return entities.get('company')
+            # Get raw HTML if available for span extraction
+            html = None
+            if email_message:
+                html = self._get_html_body(email_message)
+            
+            # Use scoring system to pick best candidate
+            company = self.spacy_extractor.extract_company_with_scoring(
+                text=text,
+                email=email,
+                html=html
+            )
+            
+            if company:
+                self.logger.debug(f"✓ Extracted company using scoring: {company}")
+            
+            return company
         
         elif field == 'location':
             entities = self.spacy_extractor.extract_entities(text)
