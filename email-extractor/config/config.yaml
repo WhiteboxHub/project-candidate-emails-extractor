@@ -1,0 +1,111 @@
+# Email Extractor Configuration
+
+# Database Configuration
+database:
+  host: ${DB_HOST}
+  port: 3306
+  user: ${DB_USER}
+  password: ${DB_PASSWORD}
+  database: ${DB_NAME}
+
+# Email Connection Settings
+email:
+  imap_server: imap.gmail.com
+  imap_port: 993
+  batch_size: 100
+  timeout: 30
+
+# Extraction Pipeline Configuration
+extraction:
+  enabled_methods:
+    - regex      # Fast, basic pattern matching
+    - spacy      # NER-based entity extraction
+    - gliner     # Modern zero-shot NER (UPDATED!)
+  
+  # Gmail and personal email blocking
+  block_gmail: true  # Completely block Gmail and personal email addresses
+  block_personal_emails: true  # Block all personal email domains
+  
+  # Multiple contact extraction
+  extract_multiple_contacts: true  # Extract sender, from, cc as separate contacts
+  
+  # Email extraction priority order (highest to lowest)
+  email_priority:
+    - reply-to    # Direct contact (highest priority)
+    - sender      # Explicit sender header
+    - from        # Message originator
+    - cc          # CC recipients
+    - body        # Body text extraction (lowest priority)
+  
+  # Field-specific extractor priority
+  fields:
+    name:
+      methods: ['spacy', 'gliner']  # CHANGED from huggingface
+      required: false
+    email:
+      methods: ['regex']
+      required: true
+    phone:
+      methods: ['regex']
+      required: false
+    company:
+      methods: ['spacy', 'gliner']  # CHANGED from huggingface
+      required: false
+    linkedin_id:
+      methods: ['regex']
+      required: false
+    location:  # NEW - GLiNER can extract this too
+      methods: ['gliner']
+      required: false
+
+# Filtering Configuration
+filters:
+  use_ml_classifier: true
+  ml_model_dir: ../models
+  
+  # All filter rules (domains, keywords, patterns) are now managed dynamically
+  # via keywords.csv and loaded from the database through filter_repository.py
+  # This ensures a single source of truth and easy updates without code changes.
+  # 
+  # To add/modify filters:
+  # 1. Update keywords.csv with your filter rules
+  # 2. Import to database via the job_automation_keywords API
+  # 3. Changes take effect immediately on next service restart
+
+# Processing Configuration
+processing:
+  candidate_filters:
+    status: null  # null = process all, or set ['active']
+    has_credentials: true  # Only process if email + password exist
+  
+  calendar_invites:
+    process: true
+    bypass_ml_filter: true
+
+# GLiNER Configuration (NEW!)
+gliner:
+  model: urchade/gliner_base  # Options: gliner_small, gliner_base, gliner_medium
+  threshold: 0.5  # Confidence threshold (0-1)
+  entity_labels:  # Custom entity types (zero-shot!)
+    - person name
+    - full name
+    - company name
+    - organization
+    - location
+    - city
+    - job title
+    - position
+  use_local: true  # Download and run locally (no API needed)
+  cache_dir: ./models/gliner_cache
+
+# Spacy Configuration
+spacy:
+  model: en_core_web_sm
+  disable_pipes: []
+
+# Logging Configuration
+logging:
+  level: INFO
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  log_to_file: false
+  log_file: logs/extractor.log
