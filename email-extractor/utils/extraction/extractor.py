@@ -140,7 +140,7 @@ class ContactExtractor:
                 vendor_info = self.spacy_extractor.extract_vendor_from_span(raw_html)
             
             # Extract all potential email addresses based on priority
-            # Priority order: Reply-To > Sender > From > CC/BCC > Calendar > Body
+            # Priority order: Reply-To > Sender > From > To > CC/BCC > Calendar > Body
             all_emails = []
             
             # 1. Reply-To (highest priority - direct contact)
@@ -158,20 +158,26 @@ class ContactExtractor:
             if from_email and not self._is_gmail_address(from_email, block_gmail):
                 all_emails.append(('from', from_email))
             
-            # 4. CC/BCC headers (additional contacts)
+            # 4. To header (recipients - may include vendors)
+            to_emails = self._extract_to_recipients(email_message)
+            for to_email in to_emails:
+                if not self._is_gmail_address(to_email, block_gmail):
+                    all_emails.append(('to', to_email))
+            
+            # 5. CC/BCC headers (additional contacts)
             cc_emails = self._extract_cc_bcc_emails(email_message)
             for cc_email in cc_emails:
                 if not self._is_gmail_address(cc_email, block_gmail):
                     all_emails.append(('cc', cc_email))
             
-            # 5. Calendar invite emails
+            # 6. Calendar invite emails
             calendar_emails = self._extract_calendar_email(email_message)
             if calendar_emails:
                 for cal_email in calendar_emails:
                     if not self._is_gmail_address(cal_email, block_gmail):
                         all_emails.append(('calendar', cal_email))
             
-            # 6. Body extraction (lowest priority)
+            # 7. Body extraction (lowest priority)
             body_email = self._extract_field('email', clean_body, email_message)
             if body_email and not self._is_gmail_address(body_email, block_gmail):
                 all_emails.append(('body', body_email))
@@ -240,29 +246,99 @@ class ContactExtractor:
                 if not contact['company'] and contact['email']:
                     contact['company'] = self._extract_company_from_email(contact['email'])
                 
-                # Extract location with zip code
-                location_data = self._extract_field('location_with_zip', clean_body, email_message)
-                if location_data and isinstance(location_data, dict):
-                    contact['location'] = location_data.get('location')
-                    contact['zip_code'] = location_data.get('zip_code')
+                # CRITICAL FIX: Extract location from SUBJECT FIRST, then body
+                # This ensures we capture locations like "Charlotte, NC" from subject lines
+                location_from_subject = None
+                if subject and self.location_extractor:
+                    # Normalize acronyms in subject
+                    normalized_subject = self.position_extractor._normalize_acronyms_in_text(subject) if self.position_extractor else subject
+                    location_from_subject = self.location_extractor.extract_location_with_zip(normalized_subject)
+                
+                # If we got location from subject, use it (HIGHEST PRIORITY)
+                if location_from_subject and (location_from_subject.get('location') or location_from_subject.get('zip_code')):
+                    contact['location'] = location_from_subject.get('location')
+                    contact['zip_code'] = location_from_subject.get('zip_code')
+                    self.logger.debug(f"✓ Extracted location from SUBJECT: {contact['location']}")
                 else:
-                    # Fallback to basic location extraction
-                    contact['location'] = self._extract_field('location', clean_body, email_message)
+                    # Fallback to body extraction
+                    # Normalize acronyms in body
+                    normalized_body = self.position_extractor._normalize_acronyms_in_text(clean_body) if self.position_extractor else clean_body
+                    location_data = self._extract_field('location_with_zip', normalized_body, email_message)
+                    if location_data and isinstance(location_data, dict):
+                        contact['location'] = location_data.get('location')
+                        contact['zip_code'] = location_data.get('zip_code')
+                    else:
+                        # Fallback to basic location extraction
+                        contact['location'] = self._extract_field('location', normalized_body, email_message)
+                
                 
                 # Check if body is encrypted or very short/junk
-                is_junk_body = "[WARNING: MESSAGE ENCRYPTED]" in subject.upper() or len(clean_body.strip()) < 50
+                subject_upper = subject.upper() if subject else ""
+                is_encrypted = any(marker in subject_upper for marker in ["ENCRYPTED", "SECURE MESSAGE", "CONFIDENTIAL"])
+                is_junk_body = len(clean_body.strip()) < 50
+                
+                # For encrypted or junk bodies, extract job position from subject
+                if (is_encrypted or is_junk_body) and subject:
+                    self.logger.debug(f"⚠ Body is encrypted/junk - extracting from subject: {subject[:100]}")
+                    
+                    # Extract position from subject if not already extracted
+                    if not contact['job_position']:
+                        contact['job_position'] = self._extract_field('job_position', subject, email_message=email_message, subject=subject)
+                    
+                    # CRITICAL FIX: Extract employment_type from subject for encrypted emails
+                    if not contact['employment_type'] and self.employment_type_extractor:
+                        # Normalize acronyms in subject before extraction
+                        normalized_subject = self.position_extractor._normalize_acronyms_in_text(subject) if self.position_extractor else subject
+                        contact['employment_type'] = self.employment_type_extractor.extract_employment_type_string(normalized_subject)
+                        if contact['employment_type']:
+                            self.logger.debug(f"✓ Extracted employment_type from SUBJECT: {contact['employment_type']}")
+                    
+                    # CRITICAL FIX: Extract location from subject for encrypted emails (if not already extracted)
+                    if not contact['location'] and self.location_extractor:
+                        # Normalize acronyms in subject
+                        normalized_subject = self.position_extractor._normalize_acronyms_in_text(subject) if self.position_extractor else subject
+                        location_data = self.location_extractor.extract_location_with_zip(normalized_subject)
+                        if location_data and isinstance(location_data, dict):
+                            contact['location'] = location_data.get('location')
+                            contact['zip_code'] = location_data.get('zip_code')
+                            self.logger.debug(f"✓ Extracted location from SUBJECT (encrypted): {contact['location']}")
+                
+                # Validate and clean up extracted data
+                if contact['job_position']:
+                    contact['job_position'] = contact['job_position'].strip()
+                if contact['location']:
+                    contact['location'] = contact['location'].strip()
+                if contact['company']:
+                    contact['company'] = contact['company'].strip()
                 
                 # Extract job position
                 # Pass subject line for better position extraction
-                # If body is junk, the extractor will naturally rely more on the subject-based regex
-                contact['job_position'] = self._extract_field('job_position', clean_body, email_message, subject=subject)
+                if not contact['job_position']: # Only extract if not already extracted from subject
+                    contact['job_position'] = self._extract_field('job_position', clean_body, email_message, subject=subject)
                 
-                # If still no position and it's a junk body, try a last-ditch attempt on subject ONLY
+                # If still no position and it's a junk/encrypted body, try a last-ditch attempt on subject ONLY
+                # This block is now mostly redundant due to the new encrypted/junk body handling above,
+                # but kept for any edge cases where the above might not catch it.
                 if not contact['job_position'] and is_junk_body:
                     contact['job_position'] = self._extract_field('job_position', subject, email_message)
                 
-                # Extract employment type (W2, C2C, Contract, etc.)
-                if self.employment_type_extractor:
+                # If body is encrypted, many body-based extractions will fail. 
+                # Use subject for location/company/position as much as possible.
+                # This block is now mostly handled by the new encrypted/junk body handling above.
+                # The location part is specifically addressed.
+                if is_encrypted:
+                    if not contact['location']: # Only try if location wasn't extracted from subject already
+                        # Try extracting location from subject
+                        loc_from_sub = self._extract_field('location_with_zip', subject, email_message)
+                        if loc_from_sub and isinstance(loc_from_sub, dict):
+                            contact['location'] = loc_from_sub.get('location')
+                            contact['zip_code'] = loc_from_sub.get('zip_code')
+                    
+                    if not contact['employment_type'] and self.employment_type_extractor:
+                        contact['employment_type'] = ', '.join(self.employment_type_extractor.extract_employment_types("", subject))
+
+                # Extract employment type (W2, C2C, Contract, etc.) if not already set
+                if not contact['employment_type'] and self.employment_type_extractor:
                     employment_types = self.employment_type_extractor.extract_employment_types(clean_body, subject)
                     if employment_types:
                         contact['employment_type'] = ', '.join(employment_types)
@@ -762,6 +838,25 @@ class ContactExtractor:
             self.logger.error(f"Error extracting From: {str(e)}")
         return None
     
+    def _extract_to_recipients(self, email_message) -> List[str]:
+        """Extract emails from To header"""
+        emails = []
+        try:
+            to_header = email_message.get('To', '')
+            if to_header:
+                for addr in to_header.split(','):
+                    _, email_addr = parseaddr(addr.strip())
+                    if email_addr and '@' in email_addr:
+                        email_lower = email_addr.lower()
+                        if self._is_valid_header_email(email_lower):
+                            emails.append(email_lower)
+                            self.logger.debug(f"✓ Extracted To: {email_lower}")
+        
+        except Exception as e:
+            self.logger.error(f"Error extracting To: {str(e)}")
+        
+        return emails
+    
     def _extract_cc_bcc_emails(self, email_message) -> List[str]:
         """Extract emails from CC and BCC headers"""
         emails = []
@@ -844,6 +939,17 @@ class ContactExtractor:
                 if name and name != addr:
                     self.logger.debug(f"✓ Extracted name from From: {name}")
                     return name.strip()
+            
+            # Check To header
+            to_header = email_message.get('To', '')
+            if to_header:
+                for addr_str in to_header.split(','):
+                    addr_str = addr_str.strip()
+                    if email_lower in addr_str.lower():
+                        name, addr = parseaddr(addr_str)
+                        if name and name != addr:
+                            self.logger.debug(f"✓ Extracted name from To: {name}")
+                            return name.strip()
             
             # Check CC header
             cc = email_message.get('Cc', '')

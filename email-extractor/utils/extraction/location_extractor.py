@@ -1,4 +1,3 @@
-
 import re
 import logging
 from typing import Optional, Dict, List
@@ -239,8 +238,13 @@ class LocationExtractor:
                                 self.logger.debug(f"✓ Extracted location: {location}")
                                 return result
             
-            # If no structured location found, try to extract zip code separately
+            # If no structured location found, try to extract zip code separately from the whole text
             if not result['zip_code']:
+                result['zip_code'] = self.extract_zip_code(text)
+            
+            # If we have a city/state but no zip code, try to find a zip code anywhere in the text 
+            # (recruiter emails often have zip codes in signatures or separate lines)
+            if (result['location'] or result['city']) and not result['zip_code']:
                 result['zip_code'] = self.extract_zip_code(text)
             
             return result

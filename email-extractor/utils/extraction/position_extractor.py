@@ -21,39 +21,64 @@ class PositionExtractor:
             except:
                 self.logger.warning("SpaCy model not loaded - spacy extraction will be disabled")
         
-        # Load filter repository for trigger words
         self.filter_repo = get_filter_repository()
         self.job_title_keywords = self._load_job_title_keywords()
         
+        # Load junk intro phrases (from CSV)
+        self.junk_intro_phrases = []
+        
         # Load filter repository for CSV-driven configuration
-        self.filter_repo = get_filter_repository()
         self._load_position_filters()
         
-        # Regex patterns for job position extraction
+        # COMPREHENSIVE Regex patterns for job position extraction
+        # Ordered by specificity (most specific first)
         self.position_patterns = [
-            # "looking for a Senior Java Developer"
-            r'(?:looking for|seeking|hiring|need|require|searching for)\s+(?:a\s+|an\s+)?([A-Z][a-zA-Z\s/\-\.]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Administrator|Coordinator|Lead|Director|Programmer|Tester|Scientist|Researcher))',
+            # SUBJECT LINE PATTERNS (very common in recruiter emails)
             
-            # "Position: Senior Java Developer"
-            r'(?:position|role|opening|opportunity|job title|title):\s*([A-Z][a-zA-Z\s/\-\.]+)',
+            # "Technical Interview - GenAI Architect" or "Interview for Senior Engineer"
+            r'(?:technical\s+)?(?:interview|screening|discussion)(?:\s*[-–—_]\s*|\s+for\s+)([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|SDET|QA))',
             
-            # "for the Senior Java Developer position"
-            r'for\s+the\s+([A-Z][a-zA-Z\s/\-\.]+?(?:position|role|opening))',
+            # "Job Google ADK AI Engineer is shared with you" or "Job AI Engineer is shared"
+            r'(?:job|position|role)\s+(?:[A-Za-z0-9]+\s+){0,4}([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|Programmer|Tester|Scientist|Researcher|SRE|DevOps|SDET|QA))\s+is\s+shared',
             
-            # "Senior Java Developer - Contract"
-            r'^([A-Z][a-zA-Z\s/\-\.]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist))\s*[-–—]\s*(?:Contract|Full[- ]?time|Part[- ]?time|Permanent|Temporary)',
+            # "Urgent Requirement || Google ADK AI Engineer ||" or "W2/ C2C || Lead Java Developer ||"
+            r'(?:requirement|opening|opportunity|position|role|job)\s*\|\|?\s*(?:[A-Za-z0-9&]+\s+){0,3}([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|Programmer|Tester|Scientist|Researcher|SRE|DevOps|SDET|QA))',
             
-            # "Job: Senior Java Developer"
-            r'(?:Job|Vacancy|Req):\s*([A-Z][a-zA-Z\s/\-\.]+)',
+            # "Gen AI Engineer Irving,TX" or "GenAI Architect - Charlotte"
+            r'^([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|SRE|DevOps|SDET|QA))\s*[-–—,]\s*[A-Z][a-z]+',
             
-            # "We have an opening for Senior Java Developer"
-            r'opening for\s+(?:a\s+|an\s+)?([A-Z][a-zA-Z\s/\-\.]+)',
+            # "Fulltime Software Engineering Director Job at Dallas"
+            r'\b(?:fulltime|full-time|part-time|contract)?\s*([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|SRE|DevOps|SDET|QA))\s+(?:job|position|role|opening)',
             
-            # Subject line patterns (often just the job title)
-            r'^([A-Z][a-zA-Z\s/\-\.]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Administrator|Coordinator|Lead|Director|Programmer|Tester|Scientist|Researcher))$',
+            # "Looking for Gen AI Engineer /Lead" or "seeking GenAI Architect"
+            r'(?:looking for|seeking|hiring|need|require|searching for)\s+(?:a\s+|an\s+)?([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Administrator|Coordinator|Lead|Director|Programmer|Tester|Scientist|Researcher|SDET|QA))',
             
-            # "TCS interview--Senior Java Developer" or "Interview for Senior Java Developer"
-            r'interview(?:--|\s+for\s+)([A-Z][a-zA-Z\s/\-\.]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead))',
+            # "JOB ROLE for Agentic AI Engineer" or "opening for AI Agent Developer"
+            r'(?:job\s+role|opening|vacancy|position)\s+for\s+(?:a\s+|an\s+)?([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|SDET|QA))',
+            
+            # "Lead Java Developer || Charlotte" or "Gen AI Lead || Dallas"
+            r'\|\|?\s*([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))\s*\|\|',
+            
+            # "Senior AI Engineer Opportunity" or "ML Research Engineering role"
+            r'([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|Researcher))\s+(?:opportunity|role|position|opening)',
+            
+            # "ML Ops Senior Engineer ::" or "AI/ML Engineer with Java"
+            r'([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))\s*(?:::|with|and)',
+            
+            # "Immediate Hire - AI/ML Engineer" or "Urgent hiring - GenAI Architect"
+            r'(?:immediate|urgent|hot)\s+(?:hire|hiring|requirement|opening)\s*[-–—]\s*([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))',
+            
+            # "Direct Client job opportunity for AI Agent Developer"
+            r'(?:job\s+)?opportunity\s+for\s+([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))',
+            
+            # "Onsite Confirmation : MLOPs + AI Engineer"
+            r'(?:confirmation|requirement)\s*:\s*([A-Z][\w\s/\-\.&+]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))',
+            
+            # "We have urgent open position for Generative AI Engineer"
+            r'(?:open\s+)?position\s+for\s+([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))',
+            
+            # Broad fallback - any capitalized phrase with job keywords
+            r'\b([A-Z][\w\s/\-\.&]*?(?:AI|ML|Data|Cloud|DevOps|Software|Full\s+Stack|Backend|Frontend|Mobile|Gen\s*AI|Machine\s+Learning|Agentic)[\w\s/\-\.&]*?(?:Engineer|Developer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|Scientist|Researcher|SDET|QA))\b',
         ]
         
         # Common job title suffixes for validation - will be loaded from CSV
@@ -147,14 +172,69 @@ class PositionExtractor:
                 self.acronym_capitalizations = {}
                 self.logger.warning("⚠ acronym_capitalizations not found in CSV")
                 
+            # Load junk intro phrases
+            if 'position_junk_intro_phrases' in keyword_lists:
+                self.junk_intro_phrases = [
+                    kw.lower().strip() for kw in keyword_lists['position_junk_intro_phrases']
+                ]
+                self.logger.info(f"✓ Loaded {len(self.junk_intro_phrases)} junk intro phrases from CSV")
+            else:
+                self.junk_intro_phrases = []
+                self.logger.warning("⚠ position_junk_intro_phrases not found in CSV")
+            # NEW: Load recruiter titles to block
+            if 'blocked_recruiter_titles' in keyword_lists:
+                self.recruiter_titles = set(
+                    kw.lower().strip() for kw in keyword_lists['blocked_recruiter_titles']
+                )
+                self.logger.info(f"✓ Loaded {len(self.recruiter_titles)} recruiter titles from CSV")
+            else:
+                self.recruiter_titles = set()
+                self.logger.warning("⚠ blocked_recruiter_titles not found in CSV")
+            
+            # NEW: Load company prefixes to remove
+            if 'position_company_prefixes' in keyword_lists:
+                self.company_prefixes = [
+                    kw.lower().strip() for kw in keyword_lists['position_company_prefixes']
+                ]
+                self.logger.info(f"✓ Loaded {len(self.company_prefixes)} company prefixes from CSV")
+            else:
+                self.company_prefixes = []
+                self.logger.warning("⚠ position_company_prefixes not found in CSV")
+            
+            # NEW: Load core job keywords (required for valid positions)
+            if 'position_core_keywords' in keyword_lists:
+                self.core_keywords = set(
+                    kw.lower().strip() for kw in keyword_lists['position_core_keywords']
+                )
+                self.logger.info(f"✓ Loaded {len(self.core_keywords)} core job keywords from CSV")
+            else:
+                self.core_keywords = set()
+                self.logger.warning("⚠ position_core_keywords not found in CSV")
+            
+            # NEW: Load marketing fluff phrases
+            if 'position_marketing_fluff' in keyword_lists:
+                self.marketing_fluff = [
+                    kw.lower().strip() for kw in keyword_lists['position_marketing_fluff']
+                ]
+                self.logger.info(f"✓ Loaded {len(self.marketing_fluff)} marketing fluff phrases from CSV")
+            else:
+                self.marketing_fluff = []
+                self.logger.warning("⚠ position_marketing_fluff not found in CSV")
+                
         except Exception as e:
             self.logger.error(f"Failed to load position filters from CSV: {str(e)}")
+            # CRITICAL: Initialize ALL attributes to prevent AttributeError
             self.marketing_words = []
             self.prefixes_to_remove = []
             self.trailing_artifacts = []
             self.html_patterns = [re.compile(r'<[^>]*>', re.IGNORECASE)]
             self.job_title_suffixes = set()
             self.acronym_capitalizations = {}
+            self.junk_intro_phrases = []
+            self.recruiter_titles = set()
+            self.company_prefixes = []
+            self.core_keywords = set()
+            self.marketing_fluff = []
     
     def _normalize_acronyms_in_text(self, text: str) -> str:
         """Normalize common acronym patterns BEFORE extraction
@@ -171,19 +251,30 @@ class PositionExtractor:
         if not text:
             return text
         
-        # Common acronym patterns that get truncated
-        # Pattern: word boundary + single letter + slash + acronym
+        # Common acronym patterns that get truncated or captured partially
         acronym_fixes = [
-            (r'\bI/ML\b', 'AI/ML'),
-            (r'\bI/NLP\b', 'AI/NLP'),
-            (r'\bI/LLM\b', 'AI/LLM'),
-            (r'\bI Engineer\b', 'AI Engineer'),
-            (r'\bI Architect\b', 'AI Architect'),
-            (r'\bI Developer\b', 'AI Developer'),
-            (r'\bI Specialist\b', 'AI Specialist'),
-            # Handle "Gen I" → "Gen AI"
-            (r'\bGen I\b', 'Gen AI'),
-            (r'\bGen I/', 'Gen AI/'),
+            (r'\bi/ml\b', 'AI/ML'),
+            (r'\bi/nlp\b', 'AI/NLP'),
+            (r'\bi/llm\b', 'AI/LLM'),
+            (r'\bi/rag\b', 'AI/RAG'),
+            (r'\bi engineer\b', 'AI Engineer'),
+            (r'\bi architect\b', 'AI Architect'),
+            (r'\bi developer\b', 'AI Developer'),
+            (r'\bi specialist\b', 'AI Specialist'),
+            (r'\bi consultant\b', 'AI Consultant'),
+            (r'\bi leads\b', 'AI Lead'),
+            (r'\bi agent\b', 'AI Agent'),
+            (r'\bi automation\b', 'AI Automation'),
+            (r'\ba i\b', 'AI'),
+            (r'\bm l\b', 'ML'),
+            (r'\bgen i\b', 'Gen AI'),
+            (r'\bgen i/', 'Gen AI/'),
+            (r'\bgen-i\b', 'Gen AI'),
+            (r'\bgenai\b', 'GenAI'),
+            (r'\bgenerative ai\b', 'Generative AI'),
+            (r'\bagentic ai\b', 'Agentic AI'),
+            (r'\bagentic\b', 'Agentic'),
+            (r'\bgentic\b', 'Agentic'),  # FIX: Common typo "Gentic" → "Agentic"
         ]
         
         for pattern, replacement in acronym_fixes:
@@ -302,7 +393,7 @@ class PositionExtractor:
         seen = set()
         
         try:
-            # 1. Try subject line first (often contains job title)
+            # 1. Try subject line first (often contains job title) - HIGHEST PRIORITY
             if subject:
                 subject_position = self.extract_job_position_regex(subject)
                 if subject_position:
@@ -311,10 +402,11 @@ class PositionExtractor:
                         positions.append({
                             'job_position': subject_position,
                             'method': 'regex',
-                            'confidence': 0.90,  # High confidence for subject line
+                            'confidence': 0.95,  # VERY high confidence for subject line
                             'source': 'subject'
                         })
                         seen.add(position_key)
+                        self.logger.info(f"🎯 Extracted position from SUBJECT: {subject_position}")
             
             # 2. Try regex on body
             body_position_regex = self.extract_job_position_regex(text)
@@ -346,7 +438,6 @@ class PositionExtractor:
             positions.sort(key=lambda x: x['confidence'], reverse=True)
             
             return positions
-            
         except Exception as e:
             self.logger.error(f"Error extracting all positions: {str(e)}")
             return positions
@@ -374,29 +465,81 @@ class PositionExtractor:
         # 1. Strip HTML/XML tags and entities using CSV patterns
         position = self._strip_html_comprehensive(position)
         
+        # 1.3. Remove interview patterns (TCS Interview--, etc.) - UNIVERSAL pattern
+        # This works for ANY company: "TCS Interview--", "Google Interview:", etc.
+        position = re.sub(r'\b\w+\s+interview\s*[-:]+\s*', '', position, flags=re.IGNORECASE)
+        
+        # 1.5. Remove company-specific prefixes (from CSV) - IMPROVED
+        position_lower = position.lower()
+        for company_prefix in self.company_prefixes:
+            if company_prefix in position_lower:
+                # Find the prefix and remove it + everything before it
+                # Use word boundaries to avoid partial matches
+                idx = position_lower.find(company_prefix)
+                if idx != -1:
+                    # Remove everything up to and including the prefix
+                    position = position[idx + len(company_prefix):].strip()
+                    position_lower = position.lower()
+                    # Remove leading separators (-, :, etc.)
+                    position = re.sub(r'^[\s\-:;,\.]+', '', position)
+                    position_lower = position.lower()
+        
         # 2. Remove marketing/fluff words (from CSV)
         position_lower = position.lower()
         for fluff in self.marketing_words:
             # Use word boundaries to avoid partial matches
-            pattern = r'\b' + re.escape(fluff) + r'\b'
+            pattern = r'\b' + re.escape(fluff.lower()) + r'\b'
             position = re.sub(pattern, '', position, flags=re.IGNORECASE)
-        
+            
+        # 2.3. Remove marketing fluff phrases (from CSV)
+        position_lower = position.lower()
+        for fluff_phrase in self.marketing_fluff:
+            if fluff_phrase in position_lower:
+                # Remove the entire phrase and everything before it
+                pattern = r'.*?' + re.escape(fluff_phrase) + r'[\s.\-:]*'
+                position = re.sub(pattern, '', position, flags=re.IGNORECASE)
+                position_lower = position.lower()
+            
+        # 2.5. Aggressively remove junk intro phrases ("Hi my name is...", etc. from CSV)
+        position_lower = position.lower()
+        for intro in self.junk_intro_phrases:
+            if intro in position_lower:
+                # Find the intro phrase and everything before it, and replace with empty
+                # We also need to remove the person's name that usually follows "my name is..."
+                # Use a regex that catches "my name is [Name] and I am a [Job]"
+                name_intro_pattern = r'.*?\b' + re.escape(intro) + r'\b\s*(?:[A-Z][a-z]+\s+){1,3}(?:and\s+)?(?:i\s+am\s+)?(?:working\s+as\s+)?(?:a\s+)?'
+                new_position = re.sub(name_intro_pattern, '', position, flags=re.IGNORECASE)
+                if new_position != position:
+                    position = new_position
+                else:
+                    # Simple fallback: just strip the intro phrase if it's not a name pattern
+                    position = re.sub(r'.*?\b' + re.escape(intro) + r'\b\s*', '', position, flags=re.IGNORECASE)
+                position_lower = position.lower()
+
         # 3. Remove common prefixes (from CSV)
         position_lower = position.lower()
         for prefix in self.prefixes_to_remove:
-            if position_lower.startswith(prefix):
-                position = position[len(prefix):]
+            if position_lower.startswith(prefix.lower()):
+                position = position[len(prefix):].strip()
                 position_lower = position.lower()
         
-        # 3.5. Remove additional contextual prefixes
-        # "For AI Engineer" → "AI Engineer"
-        # "Job Description - Golang Engineer" → "Golang Engineer"
+        # 3.5. Remove additional contextual prefixes - UNIVERSAL patterns
+        # These work for ANY company, ANY domain
         contextual_prefixes = [
-            r'^For\s+',
+            r'^\s*[-–—_\|\/]+\s*',  # Leading separators
+            r'^For\s+(?:the\s+)?',
             r'^Job\s+Description\s*[-:]\s*',
             r'^Job\s+Role\s*[-:]\s*',
+            r'^Job\s+Title\s*[-:]\s*',
             r'^Position\s*[-:]\s*',
             r'^Role\s*[-:]\s*',
+            r'^Immediate\s+',
+            r'^Urgent\s+',
+            r'^Opening\s+for\s+',
+            r'^Vacancy\s+for\s+',
+            r'^Requirement\s+for\s+',
+            r'^Hiring\s+for\s+',
+            r'^\w+\s+(?:is\s+)?(?:seeking|looking\s+for)\s+',  # "Company is seeking", "XYZ looking for"
         ]
         for prefix_pattern in contextual_prefixes:
             position = re.sub(prefix_pattern, '', position, flags=re.IGNORECASE)
@@ -404,16 +547,16 @@ class PositionExtractor:
         # 4. Remove trailing artifacts (from CSV)
         for artifact in self.trailing_artifacts:
             # Remove if it's the last word
-            pattern = r'\s+' + re.escape(artifact) + r'$'
+            pattern = r'\s+' + re.escape(artifact.lower()) + r'$'
             position = re.sub(pattern, '', position, flags=re.IGNORECASE)
         
         # 5. Remove trailing words like "position", "role", "opening"
-        position = re.sub(r'\s+(position|role|opening|opportunity|job)$', '', position, flags=re.IGNORECASE)
+        position = re.sub(r'\s+(?:position|role|opening|opportunity|job|requirement|vacancy)$', '', position, flags=re.IGNORECASE)
         
         # 6. Remove extra whitespace (including multiple spaces)
         position = ' '.join(position.split())
         
-        # 7. Title case
+        # 7. Title case (but preserve acronyms later)
         position = position.title()
         
         # 8. Fix acronym capitalization (AI, ML, NLP, etc.)
@@ -426,24 +569,29 @@ class PositionExtractor:
         
         # 10. Fix common patterns
         # "And" at the beginning (from removing "Highly Skilled And...")
-        position = re.sub(r'^And\s+', '', position, flags=re.IGNORECASE)
+        position = re.sub(r'^\s*(?:and|with|at|for|is)\s+', '', position, flags=re.IGNORECASE)
         
-        # 11. Remove person names that got included
-        # Pattern: "FirstName LastName Title" → "Title"
-        # If position has 3+ words and first 2 are capitalized names, remove them
-        words = position.split()
-        if len(words) >= 3:
-            # Check if first two words look like names (capitalized, no special chars)
-            if (words[0][0].isupper() and words[0].isalpha() and 
-                words[1][0].isupper() and words[1].isalpha() and
-                len(words[0]) > 2 and len(words[1]) > 2):
-                # Check if remaining words contain job title keywords
-                remaining = ' '.join(words[2:])
-                if any(suffix in remaining.lower() for suffix in ['engineer', 'developer', 'architect', 'manager', 'specialist', 'analyst', 'consultant']):
-                    position = remaining
-                    self.logger.debug(f"✓ Removed person name from position: {' '.join(words[:2])}")
+        # 11. Final cleanup: if it still has "Hi My Name Is" (due to case sensitivity or title casing)
+        junk_remnants = [
+            r'.*?My Name Is\s+(?:[A-Z][a-z]+\s+){1,3}(?:And\s+)?(?:I\s+Am\s+)?(?:A\s+)?',
+            r'.*?I Am A\s+',
+            r'.*?Is Shared With You.*',
+        ]
+        for remnant in junk_remnants:
+            position = re.sub(remnant, '', position, flags=re.IGNORECASE)
         
-        return position.strip()
+        # 12. CRITICAL: Final acronym normalization AFTER all cleaning
+        # This catches patterns like "I/Ml Engineer" → "AI/ML Engineer" that may have been
+        # created by title casing or other cleaning steps
+        position = self._normalize_acronyms_in_text(position)
+        
+        # Final trim
+        position = position.strip()
+        # Remove leading/trailing non-alphanumeric (except some)
+        position = re.sub(r'^[^a-zA-Z0-9]+', '', position)
+        position = re.sub(r'[^a-zA-Z0-9\)]+$', '', position)
+        
+        return position
     
     def _fix_acronym_capitalization(self, text: str) -> str:
         """Fix capitalization for common acronyms (AI, ML, NLP, etc.) from CSV"""
@@ -478,7 +626,15 @@ class PositionExtractor:
         return text.strip()
     
     def _is_valid_position(self, position: str) -> bool:
-        """Validate if text looks like a job position"""
+        """
+        Validate if extracted text is a valid job position using CSV-driven rules
+        
+        Args:
+            position: Cleaned position string
+            
+        Returns:
+            True if valid position, False otherwise
+        """
         if not position:
             return False
         
@@ -494,9 +650,51 @@ class PositionExtractor:
         if position.isupper() and len(position) > 10:
             return False
         
-        # Check if it contains a job title suffix or trigger word
         position_lower = position.lower()
         
+        # CRITICAL FIX: Block recruiter name + title patterns
+        # Pattern: "FirstName LastName Recruitment Consultant" or "FirstName Recruitment Consultant"
+        # This catches patterns like "Ilir Alija Recruitment Consultant", "Rlinda Dobratiqi Senior Recruitment Consultant"
+        recruiter_name_title_pattern = r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Senior\s+)?(?:Recruitment|Recruiter|Staffing|Talent|HR)\s+(?:Consultant|Specialist|Manager|Coordinator|Lead)'
+        if re.match(recruiter_name_title_pattern, position, re.IGNORECASE):
+            self.logger.debug(f"⊘ Rejected recruiter name+title pattern: {position}")
+            return False
+        
+        # NEW: Block if it matches blocked recruiter titles (from CSV)
+        if self.recruiter_titles:
+            for recruiter_title in self.recruiter_titles:
+                if recruiter_title in position_lower:
+                    self.logger.debug(f"⊘ Rejected recruiter title: {position}")
+                    return False
+        
+        # NEW: Word count validation (2-8 words max)
+        # CRITICAL FIX: Allow 2-word positions if they contain core keywords
+        # This fixes "Gen AI" being rejected
+        words = position.split()
+        word_count = len(words)
+        
+        if word_count < 2:
+            return False
+        
+        if word_count > 8:
+            return False
+        
+        # NEW: Require at least one core keyword (from CSV)
+        # For 2-word positions, this is CRITICAL to avoid false positives
+        if self.core_keywords:
+            has_core_keyword = any(keyword in position_lower for keyword in self.core_keywords)
+            if not has_core_keyword:
+                self.logger.debug(f"⊘ Rejected (no core keyword): {position}")
+                return False
+        
+        # NEW: Block marketing fluff phrases (from CSV)
+        if self.marketing_fluff:
+            for fluff in self.marketing_fluff:
+                if fluff in position_lower:
+                    self.logger.debug(f"⊘ Rejected marketing fluff: {position}")
+                    return False
+        
+        # Check if it contains a job title suffix or trigger word
         has_suffix = any(suffix in position_lower for suffix in self.job_title_suffixes)
         has_trigger = any(trigger in position_lower for trigger in self.job_title_keywords)
         
