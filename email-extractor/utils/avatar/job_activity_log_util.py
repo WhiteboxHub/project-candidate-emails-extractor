@@ -121,8 +121,8 @@ class JobActivityLogUtil:
 
             # SAME API, but BULK payload (list)
             response = self.api_client.post(
-                "/api/job_activity_logs",
-                bulk_logs
+                "/api/job_activity_logs/bulk",
+                {"logs": bulk_logs}
             )
 
             self.logger.info(

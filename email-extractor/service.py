@@ -119,7 +119,7 @@ class EmailExtractionService:
         candidate_id = candidate.get('candidate_id')
         
         self.logger.info(f"\n{'─' * 80}")
-        self.logger.info(f"Processing: {email}")
+        self.logger.info(f"Processing: {candidate_name} ({email})")
         self.logger.info(f"{'─' * 80}")
         
         # Initialize tracking variables

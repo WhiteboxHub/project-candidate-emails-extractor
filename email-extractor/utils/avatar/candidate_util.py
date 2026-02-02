@@ -56,6 +56,11 @@ class CandidateUtil:
                 # Filter for candidates with email credentials
                 for candidate in candidates:
                     if candidate.get('email') and candidate.get('imap_password'):
+                        # Get full_name from nested candidate object if available
+                        full_name = candidate.get('email')
+                        if candidate.get('candidate') and isinstance(candidate.get('candidate'), dict):
+                            full_name = candidate.get('candidate').get('full_name') or full_name
+
                         # Map API response to expected format
                         all_candidates.append({
                             'id': candidate.get('id'),
@@ -64,7 +69,7 @@ class CandidateUtil:
                             'imap_password': candidate.get('imap_password'),
                             'status': candidate.get('status'),
                             'priority': candidate.get('priority', 100),
-                            'name': candidate.get('email')  # Use email as name if not provided
+                            'name': full_name
                         })
                 
                 # Check if we've fetched all pages

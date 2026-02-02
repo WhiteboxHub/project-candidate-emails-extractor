@@ -57,7 +57,7 @@ class VendorUtil:
         bulk_contacts = []
 
         for contact in valid_contacts:
-            full_name = contact.get("name", "").strip()
+            full_name = (contact.get("name") or "").strip()
             if not full_name:
                 self.logger.debug(
                     f"Skipping contact without name: {contact.get('email')}"
@@ -101,10 +101,10 @@ class VendorUtil:
                 f"Sending {len(bulk_contacts)} contacts to /api/vendor_contact"
             )
 
-            # IMPORTANT: sending LIST, not dict
+            # IMPORTANT: sending Wrapped Dict, matching VendorContactBulkCreate
             response = self.api_client.post(
-                "/api/vendor_contact",
-                bulk_contacts
+                "/api/vendor_contact/bulk",
+                {"contacts": bulk_contacts}
             )
 
             # Flexible response handling
@@ -147,7 +147,7 @@ class VendorUtil:
                             "raw_description": contact.get("raw_body"),
                             "raw_contact_info": json.dumps(contact_info),
                             "raw_notes": f"Extracted from {contact.get('extraction_source')}",
-                            "raw_payload": json.dumps(contact),  # Save full extraction payload
+                            "raw_payload": contact,  # Send as dict, schema handles it
                             "processing_status": "new"
                         }
                         bulk_raw_positions.append(raw_payload)
@@ -155,10 +155,10 @@ class VendorUtil:
                     if bulk_raw_positions:
                         self.logger.info(f"Sending {len(bulk_raw_positions)} raw positions to /api/raw_position")
                         
-                        # POST to /api/raw_position (SEPARATE API CALL)
+                        # POST to /api/raw-positions/bulk
                         response_raw = self.api_client.post(
-                            "/api/raw_position",
-                            bulk_raw_positions  # Send list directly, not wrapped
+                            "/api/raw-positions/bulk",
+                            {"positions": bulk_raw_positions}
                         )
                         
                         if isinstance(response_raw, dict):
