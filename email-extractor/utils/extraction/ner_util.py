@@ -315,6 +315,129 @@ class SpacyNERExtractor:
         domain_lower = domain.lower()
         return any(ats in domain_lower for ats in self.ats_domains)
     
+    def _is_valid_company_candidate(self, company: str, context: str = "") -> bool:
+        """
+        Comprehensive validation to reject junk company data
+        
+        This method uses dynamic pattern detection to identify and reject:
+        - Timestamps (AM PST, PM EST, etc.)
+        - Email body text fragments
+        - Tech stack descriptions
+        - Sentence fragments
+        - HTML entities
+        - Single words without business context
+        
+        Args:
+            company: Company name candidate
+            context: Surrounding text for context analysis
+            
+        Returns:
+            True if valid company, False if junk data
+        """
+        if not company or len(company) < 2:
+            return False
+        
+        company_lower = company.lower()
+        
+        # 1. REJECT: Too long (likely a sentence fragment or email body text)
+        if len(company) > 50:
+            self.logger.debug(f"❌ Company too long (sentence fragment): {company}")
+            return False
+        
+        # 2. REJECT: Timestamp patterns (AM PST, PM EST, 11:30 AM, etc.)
+        timestamp_patterns = [
+            r'^\d{1,2}:\d{2}\s*(AM|PM|am|pm)',  # 11:30 AM
+            r'^(AM|PM)\s+(PST|EST|CST|MST|PDT|EDT|CDT|MDT)',  # AM PST
+            r'^\d{1,2}\s*(AM|PM)',  # 11 AM
+        ]
+        if any(re.match(pattern, company) for pattern in timestamp_patterns):
+            self.logger.debug(f"❌ Company is timestamp: {company}")
+            return False
+        
+        # 3. REJECT: Tech stack descriptions
+        tech_stack_indicators = [
+            'tech stack:', 'python,', 'java,', 'aws (', 'docker,', 'kubernetes,',
+            'langchain,', 'tensorflow,', 'pytorch,', 'react,', 'node.js,',
+            'eks,', 'sagemaker,', 'lambda,', 'sql.'
+        ]
+        if any(indicator in company_lower for indicator in tech_stack_indicators):
+            self.logger.debug(f"❌ Company is tech stack description: {company}")
+            return False
+        
+        # 4. REJECT: Sentence fragments (contains sentence indicators)
+        sentence_indicators = [
+            '. ', '! ', '? ',  # Sentence endings
+            ' and i ', ' to provide ', ' has reviewed ', ' wanted to ',
+            ' we are ', ' at this time ', ' please ', ' thank you ',
+            ' our team ', ' i am ', ' you are ', ' they are '
+        ]
+        if any(ind in company_lower for ind in sentence_indicators):
+            self.logger.debug(f"❌ Company contains sentence fragment: {company}")
+            return False
+        
+        # 5. REJECT: Starts with common sentence starters
+        sentence_starters = [
+            'our team', 'i wanted', 'thank you', 'please', 'we are',
+            'at this time', 'i am', 'you are', 'they are', 'he is', 'she is',
+            'it is', 'there are', 'there is', 'this is', 'that is'
+        ]
+        if any(company_lower.startswith(starter) for starter in sentence_starters):
+            self.logger.debug(f"❌ Company starts with sentence: {company}")
+            return False
+        
+        # 6. REJECT: HTML entities or encoding artifacts
+        html_artifacts = ['&nbsp', '&amp', '&quot', '&lt', '&gt', '&#', '\u0026nbsp']
+        if any(artifact in company for artifact in html_artifacts):
+            self.logger.debug(f"❌ Company contains HTML entities: {company}")
+            return False
+        
+        # 7. REJECT: Single common words (not business names)
+        single_word_rejects = [
+            'area', 'story', 'nbsp', 'quot', 'amp', 'team', 'group',
+            'department', 'division', 'unit', 'office', 'branch'
+        ]
+        if company_lower in single_word_rejects:
+            self.logger.debug(f"❌ Company is single common word: {company}")
+            return False
+        
+        # 8. REJECT: Starts with lowercase (likely mid-sentence extraction)
+        if company[0].islower():
+            self.logger.debug(f"❌ Company starts with lowercase: {company}")
+            return False
+        
+        # 9. REJECT: Contains excessive punctuation (likely junk)
+        punctuation_count = sum(1 for c in company if c in '.,!?;:')
+        if punctuation_count > 2:
+            self.logger.debug(f"❌ Company has excessive punctuation: {company}")
+            return False
+        
+        # 10. REJECT: Ends with incomplete sentence indicators
+        incomplete_endings = [' and', ' or', ' the', ' a', ' an', ' to', ' for', ' with', ' in', ' on', ' at']
+        if any(company_lower.endswith(ending) for ending in incomplete_endings):
+            self.logger.debug(f"❌ Company ends with incomplete phrase: {company}")
+            return False
+        
+        # 11. WARN: Very short without business suffix (might be valid, but low confidence)
+        if len(company) < 4:
+            business_suffixes = ['inc', 'llc', 'ltd', 'co']
+            if not any(suffix in company_lower for suffix in business_suffixes):
+                self.logger.debug(f"⚠️  Company very short without business suffix: {company}")
+                # Don't reject, but this will get low score in _calculate_company_score
+        
+        # 12. CONTEXT CHECK: If company appears in a question context, likely junk
+        if context:
+            question_context = ['what ', 'why ', 'how ', 'when ', 'where ', 'who ', 'which ']
+            # Check if company appears near a question word
+            company_pos = context.lower().find(company_lower)
+            if company_pos > 0:
+                preceding_text = context[max(0, company_pos - 50):company_pos].lower()
+                if any(q in preceding_text for q in question_context):
+                    self.logger.debug(f"❌ Company appears in question context: {company}")
+                    return False
+        
+        # Passed all validation checks
+        return True
+    
     def _calculate_company_score(self, candidate: CompanyCandidate, context: str = "") -> float:
         """Calculate confidence score for company candidate using scoring system"""
         # Start with base score from source
@@ -756,7 +879,7 @@ class SpacyNERExtractor:
             # CANDIDATE 1: EXPLICIT CLIENT MENTIONS (HIGHEST PRIORITY - 0.95)
             # "Client: ABC Corp", "End Client: XYZ", "Our client, TechCorp"
             explicit_client = self.extract_client_company_explicit(text)
-            if explicit_client:
+            if explicit_client and self._is_valid_company_candidate(explicit_client, text):
                 candidate: CompanyCandidate = {
                     'name': explicit_client,
                     'source': 'client_explicit',
@@ -770,7 +893,7 @@ class SpacyNERExtractor:
             # CANDIDATE 2: HTML Span extraction (0.90)
             if html:
                 vendor_info = self.extract_vendor_from_span(html)
-                if vendor_info.get('company'):
+                if vendor_info.get('company') and self._is_valid_company_candidate(vendor_info['company'], html):
                     candidate: CompanyCandidate = {
                         'name': vendor_info['company'],
                         'source': 'span',
@@ -784,7 +907,7 @@ class SpacyNERExtractor:
             # CANDIDATE 3: Position Context Patterns (0.85)
             # "Java Developer at ABC Corp", "role with XYZ Inc"
             position_company = self.extract_company_from_position_context(text)
-            if position_company:
+            if position_company and self._is_valid_company_candidate(position_company, text):
                 candidate: CompanyCandidate = {
                     'name': position_company,
                     'source': 'body_client_pattern',
@@ -797,7 +920,7 @@ class SpacyNERExtractor:
             
             # CANDIDATE 4: Signature extraction (0.75)
             sig_company = self.extract_company_from_signature(text)
-            if sig_company:
+            if sig_company and self._is_valid_company_candidate(sig_company, text):
                 candidate: CompanyCandidate = {
                     'name': sig_company,
                     'source': 'signature',
@@ -811,7 +934,7 @@ class SpacyNERExtractor:
             # CANDIDATE 5: Body introduction extraction (0.60)
             # "I'm from XYZ" - usually vendor introducing themselves
             body_intro_company = self.extract_company_from_body_intro(text)
-            if body_intro_company:
+            if body_intro_company and self._is_valid_company_candidate(body_intro_company, text):
                 candidate: CompanyCandidate = {
                     'name': body_intro_company,
                     'source': 'body_intro',
@@ -824,7 +947,7 @@ class SpacyNERExtractor:
             
             # CANDIDATE 6: NER extraction (0.50)
             entities = self.extract_entities(text)
-            if entities.get('company'):
+            if entities.get('company') and self._is_valid_company_candidate(entities['company'], text):
                 candidate: CompanyCandidate = {
                     'name': entities['company'],
                     'source': 'ner',

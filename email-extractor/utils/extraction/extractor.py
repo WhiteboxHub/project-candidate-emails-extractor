@@ -355,24 +355,25 @@ class ContactExtractor:
                         contact['employment_type'] = ', '.join(employment_types)
                 
                 # CRITICAL: Cross-validate company and location to prevent conflicts
+                # STRATEGY: When conflict occurs, REJECT LOCATION (company extraction is more reliable)
                 if contact['company'] and contact['location']:
-                    # If company and location are the same or very similar, it's likely a location misclassified as company
+                    # If company and location are the same or very similar, location is wrong
                     company_lower = contact['company'].lower().strip()
                     location_lower = contact['location'].lower().strip()
                     
                     # Check if they're identical or one contains the other
                     if company_lower == location_lower:
-                        self.logger.warning(f"Company matches location - rejecting company: {contact['company']}")
-                        contact['company'] = None
+                        self.logger.warning(f"❌ Location matches company - rejecting location: {contact['location']} (keeping company: {contact['company']})")
+                        contact['location'] = None
                     elif company_lower in location_lower or location_lower in company_lower:
-                        # If one is contained in the other, prefer location and reject company
-                        self.logger.warning(f"Company overlaps with location - rejecting company: {contact['company']} (location: {contact['location']})")
-                        contact['company'] = None
+                        # If one is contained in the other, reject location (keep company)
+                        self.logger.warning(f"❌ Location overlaps with company - rejecting location: {contact['location']} (keeping company: {contact['company']})")
+                        contact['location'] = None
                 
                 # Additional check: If company looks like a location, reject it
                 if contact['company'] and self.spacy_extractor:
                     if hasattr(self.spacy_extractor, '_is_location') and self.spacy_extractor._is_location(contact['company']):
-                        self.logger.warning(f"Company looks like a location - rejecting: {contact['company']}")
+                        self.logger.warning(f"⚠️  Company looks like a location - rejecting: {contact['company']}")
                         contact['company'] = None
                 
                 # Final validation and cleanup

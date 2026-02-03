@@ -638,8 +638,40 @@ class PositionExtractor:
         if not position:
             return False
         
-        # Length check (2-100 chars)
-        if len(position) < 2 or len(position) > 100:
+        # Length check (3-60 chars) - UPDATED: max reduced from 100 to 60 to reject long sentences
+        if len(position) < 3 or len(position) > 60:
+            self.logger.debug(f"❌ Position length invalid ({len(position)} chars): {position}")
+            return False
+        
+        position_lower = position.lower()
+        
+        # 1. REJECT: Questions (What, Why, How, etc.)
+        question_indicators = ['what ', 'why ', 'how ', 'when ', 'where ', 'who ', 'which ', '?']
+        if any(ind in position_lower for ind in question_indicators):
+            self.logger.debug(f"❌ Position is a question: {position}")
+            return False
+        
+        # 2. REJECT: Starts with "Re:" or "RE:" (email subject prefix)
+        if position.startswith('Re ') or position.startswith('RE:') or position.startswith('Re:'):
+            self.logger.debug(f"❌ Position starts with Re: {position}")
+            return False
+        
+        # 3. REJECT: Company name patterns (ends with common suffixes)
+        company_suffixes = [' Software', ' Inc', ' LLC', ' Corp', ' Ltd', ' Portal', "'S Candidate Portal", "'s Candidate Portal"]
+        if any(position.endswith(suffix) for suffix in company_suffixes):
+            self.logger.debug(f"❌ Position looks like company name: {position}")
+            return False
+        
+        # 4. REJECT: Generic tech terms without role context
+        generic_tech_terms = ['Cloud Environments', 'Tech Stack', 'Software Engineering']
+        if position in generic_tech_terms:
+            self.logger.debug(f"❌ Position is generic tech term: {position}")
+            return False
+        
+        # 5. REJECT: Portal/system names
+        portal_indicators = [' Portal', ' System', ' Platform', ' Dashboard']
+        if any(ind in position for ind in portal_indicators):
+            self.logger.debug(f"❌ Position contains portal/system indicator: {position}")
             return False
         
         # Must have at least one letter

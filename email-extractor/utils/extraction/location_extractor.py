@@ -356,6 +356,44 @@ class LocationExtractor:
         
         city_lower = city.lower()
         
+        # DYNAMIC VALIDATION: Pattern-based checks (NO hardcoded company lists!)
+        
+        # 1. BUSINESS SUFFIX PATTERN: Has company-like suffixes
+        business_suffixes = ['inc', 'llc', 'corp', 'ltd', 'limited', 'corporation',
+                             'solutions', 'technologies', 'systems', 'services', 
+                             'consulting', 'group', 'partners', 'associates']
+        if any(suffix in city_lower for suffix in business_suffixes):
+            self.logger.debug(f"❌ Location has business suffix (likely company): {city}")
+            return None
+        
+        # 2. CAMELCASE PATTERN: Internal capitals without spaces = company name
+        # "TechCorp", "DataSystems" vs "Austin", "Boston"
+        if len(city) > 1 and city[0].isupper():
+            # Check for internal capitals (CamelCase)
+            internal_caps = sum(1 for c in city[1:] if c.isupper())
+            if internal_caps > 0 and ' ' not in city:
+                self.logger.debug(f"❌ Location has CamelCase pattern (likely company): {city}")
+                return None
+        
+        # 3. TECH ACRONYM PATTERN: All caps 2-4 letters (AI, ML, AWS, SQL)
+        if city.isupper() and 2 <= len(city) <= 4:
+            # Check if it's a valid state abbreviation
+            if city.upper() not in self.state_abbreviations:
+                self.logger.debug(f"❌ Location is tech acronym: {city}")
+                return None
+        
+        # 4. HTML/ENCODING ARTIFACTS
+        html_artifacts = ['&nbsp', '&amp', '&quot', '&lt', '&gt', '&#', '\u0026nbsp', 'nbsp', 'quot', 'amp']
+        if any(artifact in city_lower for artifact in html_artifacts):
+            self.logger.debug(f"❌ Location contains HTML entity: {city}")
+            return None
+        
+        # 5. GENERIC SINGLE WORDS (common false positives)
+        generic_words = ['area', 'story', 'team', 'group', 'department', 'division', 'unit', 'office', 'branch']
+        if city_lower in generic_words:
+            self.logger.debug(f"❌ Location is generic word: {city}")
+            return None
+        
         # 0. SEMANTIC VALIDATION - Reject common phrases, verbs, tech terms
         # Check if entire city name is a common phrase
         if city_lower in self.common_phrases:

@@ -54,6 +54,25 @@ class EmploymentTypeExtractor:
                 r'\bPart\s+Time\b',
                 r'\bPT\b',
             ],
+            'Remote': [
+                r'\bRemote\b',
+                r'\bWork from Home\b',
+                r'\bWFH\b',
+                r'\b100%\s*Remote\b',
+                r'\bFully\s*Remote\b',
+            ],
+            'Hybrid': [
+                r'\bHybrid\b',
+                r'\bPartially\s*Remote\b',
+                r'\bRemote/Onsite\b',
+            ],
+            'Onsite': [
+                r'\bOnsite\b',
+                r'\bOn-site\b',
+                r'\bOn\s*site\b',
+                r'\bIn-office\b',
+                r'\bIn\s*office\b',
+            ],
         }
         
         # Compile all patterns for efficiency
