@@ -1,7 +1,7 @@
 from typing import Dict, Optional, List
 import logging
-from email.utils import parseaddr
 import re
+from email.utils import parseaddr, getaddresses
 from .regex_util import RegexExtractor
 from .ner_util import SpacyNERExtractor
 from .gliner_util import GLiNERExtractor
@@ -140,44 +140,55 @@ class ContactExtractor:
                 vendor_info = self.spacy_extractor.extract_vendor_from_span(raw_html)
             
             # Extract all potential email addresses based on priority
-            # Priority order: Reply-To > Sender > From > To > CC/BCC > Calendar > Body
+            # Priority order for SOURCE: Reply-To > Sender > From
+            # ALWAYS extract: To > CC/BCC > Calendar > Body
             all_emails = []
             
-            # 1. Reply-To (highest priority - direct contact)
-            reply_to_email = self._extract_reply_to_email(email_message)
-            if reply_to_email and not self._is_gmail_address(reply_to_email, block_gmail):
-                all_emails.append(('reply-to', reply_to_email))
+            # 1. Fallback chain for primary "source" email
+            source_candidates = []
             
-            # 2. Sender header (explicit sender)
-            sender_email = self._extract_sender_email(email_message)
-            if sender_email and not self._is_gmail_address(sender_email, block_gmail):
-                all_emails.append(('sender', sender_email))
+            # Try Reply-To first (highest priority)
+            reply_to_emails = self._extract_reply_to_email(email_message)
+            if reply_to_emails:
+                source_candidates = [('reply-to', email) for email in reply_to_emails]
             
-            # 3. From header (message originator)
-            from_email = self._extract_from_header(email_message)
-            if from_email and not self._is_gmail_address(from_email, block_gmail):
-                all_emails.append(('from', from_email))
+            # If no Reply-To, try Sender
+            if not source_candidates:
+                sender_emails = self._extract_sender_email(email_message)
+                if sender_emails:
+                    source_candidates = [('sender', email) for email in sender_emails]
             
-            # 4. To header (recipients - may include vendors)
+            # If no Sender, try From
+            if not source_candidates:
+                from_emails = self._extract_from_header(email_message)
+                if from_emails:
+                    source_candidates = [('from', email) for email in from_emails]
+            
+            # Add filtered source candidates to all_emails
+            for source, email_addr in source_candidates:
+                if not self._is_gmail_address(email_addr, block_gmail):
+                    all_emails.append((source, email_addr))
+            
+            # 2. To header (recipients - always extract as separate contacts)
             to_emails = self._extract_to_recipients(email_message)
             for to_email in to_emails:
                 if not self._is_gmail_address(to_email, block_gmail):
                     all_emails.append(('to', to_email))
             
-            # 5. CC/BCC headers (additional contacts)
+            # 3. CC/BCC headers (additional contacts - always extract)
             cc_emails = self._extract_cc_bcc_emails(email_message)
             for cc_email in cc_emails:
                 if not self._is_gmail_address(cc_email, block_gmail):
                     all_emails.append(('cc', cc_email))
             
-            # 6. Calendar invite emails
+            # 4. Calendar invite emails
             calendar_emails = self._extract_calendar_email(email_message)
             if calendar_emails:
                 for cal_email in calendar_emails:
                     if not self._is_gmail_address(cal_email, block_gmail):
                         all_emails.append(('calendar', cal_email))
             
-            # 7. Body extraction (lowest priority)
+            # 5. Body extraction
             body_email = self._extract_field('email', clean_body, email_message)
             if body_email and not self._is_gmail_address(body_email, block_gmail):
                 all_emails.append(('body', body_email))
@@ -793,50 +804,53 @@ class ContactExtractor:
         
         return False
     
-    def _extract_reply_to_email(self, email_message) -> Optional[str]:
-        """Extract email from Reply-To header (highest priority)"""
+    def _extract_reply_to_email(self, email_message) -> List[str]:
+        """Extract emails from Reply-To header"""
+        emails = []
         try:
             reply_to = email_message.get('Reply-To', '')
             if reply_to:
-                _, email_addr = parseaddr(reply_to)
-                if email_addr and '@' in email_addr:
-                    email_lower = email_addr.lower()
-                    if self._is_valid_header_email(email_lower):
-                        self.logger.debug(f"✓ Extracted Reply-To: {email_lower}")
-                        return email_lower
+                for name, email_addr in getaddresses([reply_to]):
+                    if email_addr and '@' in email_addr:
+                        email_lower = email_addr.lower()
+                        if self._is_valid_header_email(email_lower):
+                            emails.append(email_lower)
+                            self.logger.debug(f"✓ Extracted Reply-To: {email_lower}")
         except Exception as e:
             self.logger.error(f"Error extracting Reply-To: {str(e)}")
-        return None
+        return emails
     
-    def _extract_sender_email(self, email_message) -> Optional[str]:
-        """Extract email from Sender header"""
+    def _extract_sender_email(self, email_message) -> List[str]:
+        """Extract emails from Sender header"""
+        emails = []
         try:
             sender = email_message.get('Sender', '')
             if sender:
-                _, email_addr = parseaddr(sender)
-                if email_addr and '@' in email_addr:
-                    email_lower = email_addr.lower()
-                    if self._is_valid_header_email(email_lower):
-                        self.logger.debug(f"✓ Extracted Sender: {email_lower}")
-                        return email_lower
+                for name, email_addr in getaddresses([sender]):
+                    if email_addr and '@' in email_addr:
+                        email_lower = email_addr.lower()
+                        if self._is_valid_header_email(email_lower):
+                            emails.append(email_lower)
+                            self.logger.debug(f"✓ Extracted Sender: {email_lower}")
         except Exception as e:
             self.logger.error(f"Error extracting Sender: {str(e)}")
-        return None
+        return emails
     
-    def _extract_from_header(self, email_message) -> Optional[str]:
-        """Extract email from From header"""
+    def _extract_from_header(self, email_message) -> List[str]:
+        """Extract emails from From header"""
+        emails = []
         try:
             from_header = email_message.get('From', '')
             if from_header:
-                _, email_addr = parseaddr(from_header)
-                if email_addr and '@' in email_addr:
-                    email_lower = email_addr.lower()
-                    if self._is_valid_header_email(email_lower):
-                        self.logger.debug(f"✓ Extracted From: {email_lower}")
-                        return email_lower
+                for name, email_addr in getaddresses([from_header]):
+                    if email_addr and '@' in email_addr:
+                        email_lower = email_addr.lower()
+                        if self._is_valid_header_email(email_lower):
+                            emails.append(email_lower)
+                            self.logger.debug(f"✓ Extracted From: {email_lower}")
         except Exception as e:
             self.logger.error(f"Error extracting From: {str(e)}")
-        return None
+        return emails
     
     def _extract_to_recipients(self, email_message) -> List[str]:
         """Extract emails from To header"""
@@ -844,8 +858,7 @@ class ContactExtractor:
         try:
             to_header = email_message.get('To', '')
             if to_header:
-                for addr in to_header.split(','):
-                    _, email_addr = parseaddr(addr.strip())
+                for name, email_addr in getaddresses([to_header]):
                     if email_addr and '@' in email_addr:
                         email_lower = email_addr.lower()
                         if self._is_valid_header_email(email_lower):
@@ -864,8 +877,7 @@ class ContactExtractor:
             # Check CC header
             cc_header = email_message.get('Cc', '')
             if cc_header:
-                for addr in cc_header.split(','):
-                    _, email_addr = parseaddr(addr.strip())
+                for name, email_addr in getaddresses([cc_header]):
                     if email_addr and '@' in email_addr:
                         email_lower = email_addr.lower()
                         if self._is_valid_header_email(email_lower):
@@ -875,8 +887,7 @@ class ContactExtractor:
             # Check BCC header (rarely present in received emails, but check anyway)
             bcc_header = email_message.get('Bcc', '')
             if bcc_header:
-                for addr in bcc_header.split(','):
-                    _, email_addr = parseaddr(addr.strip())
+                for name, email_addr in getaddresses([bcc_header]):
                     if email_addr and '@' in email_addr:
                         email_lower = email_addr.lower()
                         if self._is_valid_header_email(email_lower):
@@ -916,61 +927,19 @@ class ContactExtractor:
         email_lower = email_addr.lower()
         
         try:
-            # Check Reply-To header
-            reply_to = email_message.get('Reply-To', '')
-            if reply_to and email_lower in reply_to.lower():
-                name, addr = parseaddr(reply_to)
-                if name and name != addr:  # Has a display name
-                    self.logger.debug(f"✓ Extracted name from Reply-To: {name}")
-                    return name.strip()
+            # Headers to check in order
+            headers_to_check = ['Reply-To', 'Sender', 'From', 'To', 'Cc', 'Bcc']
             
-            # Check Sender header
-            sender = email_message.get('Sender', '')
-            if sender and email_lower in sender.lower():
-                name, addr = parseaddr(sender)
-                if name and name != addr:
-                    self.logger.debug(f"✓ Extracted name from Sender: {name}")
-                    return name.strip()
-            
-            # Check From header
-            from_header = email_message.get('From', '')
-            if from_header and email_lower in from_header.lower():
-                name, addr = parseaddr(from_header)
-                if name and name != addr:
-                    self.logger.debug(f"✓ Extracted name from From: {name}")
-                    return name.strip()
-            
-            # Check To header
-            to_header = email_message.get('To', '')
-            if to_header:
-                for addr_str in to_header.split(','):
-                    addr_str = addr_str.strip()
-                    if email_lower in addr_str.lower():
-                        name, addr = parseaddr(addr_str)
+            for header_name in headers_to_check:
+                header_value = email_message.get(header_name, '')
+                if not header_value:
+                    continue
+                    
+                # Parse all addresses in this header
+                for name, addr in getaddresses([header_value]):
+                    if addr and addr.lower() == email_lower:
                         if name and name != addr:
-                            self.logger.debug(f"✓ Extracted name from To: {name}")
-                            return name.strip()
-            
-            # Check CC header
-            cc = email_message.get('Cc', '')
-            if cc:
-                for addr_str in cc.split(','):
-                    addr_str = addr_str.strip()
-                    if email_lower in addr_str.lower():
-                        name, addr = parseaddr(addr_str)
-                        if name and name != addr:
-                            self.logger.debug(f"✓ Extracted name from CC: {name}")
-                            return name.strip()
-            
-            # Check BCC header (rarely present)
-            bcc = email_message.get('Bcc', '')
-            if bcc:
-                for addr_str in bcc.split(','):
-                    addr_str = addr_str.strip()
-                    if email_lower in addr_str.lower():
-                        name, addr = parseaddr(addr_str)
-                        if name and name != addr:
-                            self.logger.debug(f"✓ Extracted name from BCC: {name}")
+                            self.logger.debug(f"✓ Extracted name from {header_name}: {name}")
                             return name.strip()
         
         except Exception as e:
@@ -1017,13 +986,6 @@ class ContactExtractor:
                         for match in re.findall(r"ATTENDEE.*mailto:([^ \r\n]+)", payload, re.IGNORECASE):
                             emails.add(match.lower())
             
-            # Fallback to headers
-            if not emails:
-                for header in ["Sender", "Reply-To", "From"]:
-                    if header in email_message:
-                        _, addr = parseaddr(email_message.get(header))
-                        if addr and "noreply" not in addr.lower():
-                            emails.add(addr.lower())
             
             return list(emails) if emails else None
             

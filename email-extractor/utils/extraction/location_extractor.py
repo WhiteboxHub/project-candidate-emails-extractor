@@ -68,11 +68,11 @@ class LocationExtractor:
         # (?:\s+[A-Z][a-z]+)* - Multi-word cities (Palo Alto, Santa Clara)
         # {3,30} - Length validation (prevents single letters and very long phrases)
         self.location_patterns = [
-            # "City, ST 12345" - STRICT: proper capitalization, word boundaries
-            r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}),\s*([A-Z]{2})\b(?:\s*(\d{5}(?:-\d{4})?))?',
+            # "City, ST 12345" - STRICT State case [A-Z]{2}
+            r'\b([A-Z][a-z]+(?:\s+[A-Za-z][a-z]+){0,3}),\s*([A-Z]{2})\b(?:\s*(\d{5}(?:-\d{4})?))?',
             
-            # "Location: City, ST" - STRICT: with keyword prefix
-            r'(?:Location|City|Based in|Located in):\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}),\s*([A-Z]{2})\b(?:\s*(\d{5}(?:-\d{4})?))?',
+            # "Location: City, ST" - STRICT State case [A-Z]{2}
+            r'(?:Location|City|Based in|Located in):\s*([A-Z][a-z]+(?:\s+[A-Za-z][a-z]+){0,3}),\s*([A-Z]{2})\b(?:\s*(\d{5}(?:-\d{4})?))?',
         ]
     
     def _load_location_filters(self):
@@ -206,7 +206,9 @@ class LocationExtractor:
             
             # Try each location pattern
             for pattern in self.location_patterns:
-                matches = re.finditer(pattern, text, re.MULTILINE | re.IGNORECASE)
+                # Removed re.IGNORECASE to prevent matching "or" as "OR" (Oregon)
+                # and to ensure proper capitalization of cities/states.
+                matches = re.finditer(pattern, text, re.MULTILINE)
                 
                 for match in matches:
                     city = match.group(1).strip() if match.lastindex >= 1 else None
@@ -400,11 +402,27 @@ class LocationExtractor:
             self.logger.debug(f"✗ Rejected junk location: {city} (too many non-alpha chars)")
             return None
         
-        # 5. US-only validation: Check if city is in major US cities list
+        # 5. Dynamic Heuristics - Word count and capitalization
+        words = city.split()
+        if len(words) >= 3:
+            # If it's 3+ words, it MUST be in our major cities list (e.g. Salt Lake City, San Francisco)
+            # or it's likely a sentence fragment like "Applicable Privacy Rights"
+            if city_lower not in self.us_major_cities:
+                self.logger.debug(f"✗ Rejected multi-word non-city: {city}")
+                return None
+        
+        # Check if the city contains common lowercase connectors (and, or, with) 
+        # which signify a sentence fragment that regex accidentally captured.
+        if any(connector in city.split() for connector in ['or', 'and', 'with', 'from']):
+            # If it has "or" (lowercase), it's definitely a sentence part
+            self.logger.debug(f"✗ Rejected sentence fragment with connector: {city}")
+            return None
+
+        # 6. US-only validation: Check if city is in major US cities list
         # This is optional but improves quality - only validate if we have the list
         if self.us_major_cities:
             if city_lower not in self.us_major_cities:
-                # Allow if it's a less common city, but log it
+                # Allow if it's a less common single/double word city, but log it
                 self.logger.debug(f"⚠ Location not in major US cities list: {city} (may be valid but uncommon)")
         
         return city
