@@ -17,28 +17,15 @@ class LocationExtractor:
         self.state_name_to_abbr = {}
         self.street_name_indicators = set()
         
-        # Common phrases that are NOT city names (semantic validation)
-        self.common_phrases = {
-            'thank you', 'kind regards', 'best regards', 'sincerely',
-            'regards', 'thanks', 'cheers', 'yours', 'respectfully',
-            'cordially', 'warmly', 'looking forward'
-        }
-        
-        # Common verbs/adjectives that are NOT city names
-        self.common_verbs_adjectives = {
-            'growing', 'managing', 'leading', 'developing', 'building',
-            'creating', 'designing', 'testing', 'working', 'including',
-            'ensuring', 'providing', 'supporting', 'maintaining'
-        }
-        
-        # Technology terms that are NOT city names
-        self.tech_terms = {
-            'sql', 'api', 'aws', 'gcp', 'azure', 'cloud', 'java',
-            'python', 'react', 'node', 'docker', 'kubernetes'
-        }
-        
-        # Conjunctions/prepositions that shouldn't start city names
-        self.invalid_prefixes = {'or', 'and', 'for', 'with', 'from', 'to'}
+        # Initialize sets that will be loaded from CSV
+        self.common_phrases = set()
+        self.common_verbs_adjectives = set()
+        self.tech_terms = set()
+        self.invalid_prefixes = set()
+        self.location_business_suffixes = set()
+        self.location_html_artifacts = set()
+        self.generic_words = set()
+        self.prefixes_to_remove = []
         
         # Load filter repository for CSV-driven configuration
         self.filter_repo = get_filter_repository()
@@ -142,15 +129,74 @@ class LocationExtractor:
             else:
                 self.street_name_indicators = set()
                 self.logger.warning("⚠ location_name_indicators not found in CSV")
+
+            # Load location common phrases
+            if 'location_common_phrases' in keyword_lists:
+                self.common_phrases = set(
+                    kw.lower().strip() for kw in keyword_lists['location_common_phrases']
+                )
+                self.logger.info(f"✓ Loaded {len(self.common_phrases)} common phrases from CSV")
+            
+            # Load location tech terms
+            if 'location_tech_terms' in keyword_lists:
+                self.tech_terms = set(
+                    kw.lower().strip() for kw in keyword_lists['location_tech_terms']
+                )
+                self.logger.info(f"✓ Loaded {len(self.tech_terms)} tech terms from CSV")
+                
+            # Load location verbs/adjectives
+            if 'location_verbs_adjectives' in keyword_lists:
+                self.common_verbs_adjectives = set(
+                    kw.lower().strip() for kw in keyword_lists['location_verbs_adjectives']
+                )
+                self.logger.info(f"✓ Loaded {len(self.common_verbs_adjectives)} verbs/adjectives from CSV")
+                
+            # Load invalid prefixes
+            if 'location_invalid_prefixes' in keyword_lists:
+                self.invalid_prefixes = set(
+                    kw.lower().strip() for kw in keyword_lists['location_invalid_prefixes']
+                )
+                self.logger.info(f"✓ Loaded {len(self.invalid_prefixes)} invalid prefixes from CSV")
+                
+            # Load business suffixes
+            if 'location_business_suffixes' in keyword_lists:
+                self.location_business_suffixes = set(
+                    kw.lower().strip() for kw in keyword_lists['location_business_suffixes']
+                )
+                self.logger.info(f"✓ Loaded {len(self.location_business_suffixes)} business suffixes from CSV")
+                
+            # Load html artifacts
+            if 'location_html_artifacts' in keyword_lists:
+                self.location_html_artifacts = set(
+                    kw.lower().strip() for kw in keyword_lists['location_html_artifacts']
+                )
+                self.logger.info(f"✓ Loaded {len(self.location_html_artifacts)} HTML artifacts from CSV")
+                
+            # Load generic words
+            if 'location_generic_words' in keyword_lists:
+                self.generic_words = set(
+                    kw.lower().strip() for kw in keyword_lists['location_generic_words']
+                )
+                self.logger.info(f"✓ Loaded {len(self.generic_words)} generic words from CSV")
+                
+            # Load prefixes to remove
+            if 'location_prefixes_to_remove' in keyword_lists:
+                self.prefixes_to_remove = [
+                    kw.lower().strip() for kw in keyword_lists['location_prefixes_to_remove']
+                ]
+                self.logger.info(f"✓ Loaded {len(self.prefixes_to_remove)} prefixes to remove from CSV")
                 
         except Exception as e:
             self.logger.error(f"Failed to load location filters from CSV: {str(e)}")
-            self.location_false_positives = set()
-            self.us_major_cities = set()
-            self.location_junk_patterns = []
-            self.us_states = set()
-            self.state_name_to_abbr = {}
             self.street_name_indicators = set()
+            self.common_phrases = set()
+            self.tech_terms = set()
+            self.common_verbs_adjectives = set()
+            self.invalid_prefixes = set()
+            self.location_business_suffixes = set()
+            self.location_html_artifacts = set()
+            self.generic_words = set()
+            self.prefixes_to_remove = []
     
     def extract_zip_code(self, text: str) -> Optional[str]:
         """
@@ -321,26 +367,13 @@ class LocationExtractor:
         # Remove extra whitespace
         city = ' '.join(city.split())
         
-        # Remove common location prefixes that get captured by regex
-        # "Agent Santa Clara" → "Santa Clara"
-        # "Engineer At Charlotte" → "Charlotte"
-        # "Location Of Concord" → "Concord"
-        location_prefixes = [
-            r'^Agent\s+',
-            r'^Engineer\s+At\s+',
-            r'^Location\s+Of\s+',
-            r'^Onsite\s+In\s+',
-            r'^Based\s+In\s+',
-            r'^Located\s+In\s+',
-            r'^Ca\s+Or\s+',  # "Ca Or Austin" → "Austin"
-            r'^Or\s+',        # "Or Dallas" → "Dallas"
-            r'^And\s+',
-            r'^At\s+',
-            r'^In\s+',
-            r'^Various\s+',   # "Various Product Lines" → reject later
-        ]
-        for prefix_pattern in location_prefixes:
-            city = re.sub(prefix_pattern, '', city, flags=re.IGNORECASE)
+        if self.prefixes_to_remove:
+            for prefix in self.prefixes_to_remove:
+                pattern = rf'^{re.escape(prefix)}\s+'
+                city = re.sub(pattern, '', city, flags=re.IGNORECASE)
+                # Also handle simple "At ", "In " etc if they were individual keywords
+                if prefix.lower() in ['at', 'in', 'or', 'and']:
+                    city = re.sub(rf'^{re.escape(prefix)}\s+', '', city, flags=re.IGNORECASE)
         
         # Title case
         city = city.title()
@@ -358,11 +391,8 @@ class LocationExtractor:
         
         # DYNAMIC VALIDATION: Pattern-based checks (NO hardcoded company lists!)
         
-        # 1. BUSINESS SUFFIX PATTERN: Has company-like suffixes
-        business_suffixes = ['inc', 'llc', 'corp', 'ltd', 'limited', 'corporation',
-                             'solutions', 'technologies', 'systems', 'services', 
-                             'consulting', 'group', 'partners', 'associates']
-        if any(suffix in city_lower for suffix in business_suffixes):
+        # 1. BUSINESS SUFFIX PATTERN: Has company-like suffixes (CSV-driven)
+        if self.location_business_suffixes and any(suffix in city_lower for suffix in self.location_business_suffixes):
             self.logger.debug(f"❌ Location has business suffix (likely company): {city}")
             return None
         
@@ -378,25 +408,23 @@ class LocationExtractor:
         # 3. TECH ACRONYM PATTERN: All caps 2-4 letters (AI, ML, AWS, SQL)
         if city.isupper() and 2 <= len(city) <= 4:
             # Check if it's a valid state abbreviation
-            if city.upper() not in self.state_abbreviations:
+            if city.upper() not in self.us_states:
                 self.logger.debug(f"❌ Location is tech acronym: {city}")
                 return None
         
-        # 4. HTML/ENCODING ARTIFACTS
-        html_artifacts = ['&nbsp', '&amp', '&quot', '&lt', '&gt', '&#', '\u0026nbsp', 'nbsp', 'quot', 'amp']
-        if any(artifact in city_lower for artifact in html_artifacts):
+        # 4. HTML/ENCODING ARTIFACTS (CSV-driven)
+        if self.location_html_artifacts and any(artifact in city_lower for artifact in self.location_html_artifacts):
             self.logger.debug(f"❌ Location contains HTML entity: {city}")
             return None
         
-        # 5. GENERIC SINGLE WORDS (common false positives)
-        generic_words = ['area', 'story', 'team', 'group', 'department', 'division', 'unit', 'office', 'branch']
-        if city_lower in generic_words:
+        # 5. GENERIC SINGLE WORDS (CSV-driven)
+        if self.generic_words and city_lower in self.generic_words:
             self.logger.debug(f"❌ Location is generic word: {city}")
             return None
         
-        # 0. SEMANTIC VALIDATION - Reject common phrases, verbs, tech terms
+        # 0. SEMANTIC VALIDATION - Reject common phrases, verbs, tech terms (CSV-driven)
         # Check if entire city name is a common phrase
-        if city_lower in self.common_phrases:
+        if self.common_phrases and city_lower in self.common_phrases:
             self.logger.debug(f"✗ Rejected common phrase: {city}")
             return None
         

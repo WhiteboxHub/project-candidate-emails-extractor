@@ -10,6 +10,7 @@ This module extracts employment/contract types such as:
 import re
 import logging
 from typing import Optional, List, Set
+from utils.filters.filter_repository import get_filter_repository
 
 logger = logging.getLogger(__name__)
 
@@ -19,68 +20,46 @@ class EmploymentTypeExtractor:
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
+        self.filter_repo = get_filter_repository()
         
         # Employment type patterns with their normalized forms
-        self.employment_patterns = {
-            'W2': [
-                r'\bW-?2\b',
-                r'\bW\s*2\b',
-            ],
-            'C2C': [
-                r'\bC-?2-?C\b',
-                r'\bCorp\s*to\s*Corp\b',
-                r'\bCorp-to-Corp\b',
-            ],
-            '1099': [
-                r'\b1099\b',
-                r'\bIndependent\s+Contractor\b',
-            ],
-            'Full-time': [
-                r'\bFull-?time\b',
-                r'\bFull\s+Time\b',
-                r'\bFT\b',
-                r'\bPermanent\b',
-                r'\bPerm\b',
-            ],
-            'Contract': [
-                r'\bContract\b',
-                r'\bContractor\b',
-                r'\bCTR\b',
-                r'\bTemp\b',
-                r'\bTemporary\b',
-            ],
-            'Part-time': [
-                r'\bPart-?time\b',
-                r'\bPart\s+Time\b',
-                r'\bPT\b',
-            ],
-            'Remote': [
-                r'\bRemote\b',
-                r'\bWork from Home\b',
-                r'\bWFH\b',
-                r'\b100%\s*Remote\b',
-                r'\bFully\s*Remote\b',
-            ],
-            'Hybrid': [
-                r'\bHybrid\b',
-                r'\bPartially\s*Remote\b',
-                r'\bRemote/Onsite\b',
-            ],
-            'Onsite': [
-                r'\bOnsite\b',
-                r'\bOn-site\b',
-                r'\bOn\s*site\b',
-                r'\bIn-office\b',
-                r'\bIn\s*office\b',
-            ],
-        }
-        
-        # Compile all patterns for efficiency
+        self.employment_patterns = {}
         self.compiled_patterns = {}
-        for emp_type, patterns in self.employment_patterns.items():
-            self.compiled_patterns[emp_type] = [
-                re.compile(pattern, re.IGNORECASE) for pattern in patterns
-            ]
+        
+        self._load_employment_filters()
+        
+    def _load_employment_filters(self):
+        """Load employment type patterns from CSV"""
+        try:
+            keyword_lists = self.filter_repo.get_keyword_lists()
+            
+            if 'employment_patterns' in keyword_lists:
+                patterns_raw = keyword_lists['employment_patterns']
+                
+                # Input format (format: Type|Pattern1;Pattern2)
+                # Note: patterns_raw is a list because get_keyword_lists splits segments by comma
+                for mapping in patterns_raw:
+                    if '|' in mapping:
+                        emp_type, regexes_str = mapping.split('|', 1)
+                        # Patterns are separated by semicolon inside the mapping
+                        regexes = [r.strip() for r in regexes_str.split(';') if r.strip()]
+                        
+                        self.employment_patterns[emp_type] = regexes
+                        self.compiled_patterns[emp_type] = [
+                            re.compile(r, re.IGNORECASE) for r in regexes
+                        ]
+                
+                self.logger.info(f"✓ Loaded {len(self.employment_patterns)} employment types from CSV")
+            else:
+                self.logger.warning("⚠ employment_patterns not found in CSV")
+                # Fallback to empty if not found (though CSV update just added it)
+                self.employment_patterns = {}
+                self.compiled_patterns = {}
+                
+        except Exception as e:
+            self.logger.error(f"Failed to load employment filters from CSV: {str(e)}")
+            self.employment_patterns = {}
+            self.compiled_patterns = {}
     
     def extract_employment_types(self, text: str, subject: str = None) -> List[str]:
         """

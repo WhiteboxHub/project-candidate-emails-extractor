@@ -220,6 +220,46 @@ class PositionExtractor:
             else:
                 self.marketing_fluff = []
                 self.logger.warning("⚠ position_marketing_fluff not found in CSV")
+            
+            # NEW: Load generic tech terms
+            if 'position_generic_tech_terms' in keyword_lists:
+                self.generic_tech_terms = [
+                    kw.lower().strip() for kw in keyword_lists['position_generic_tech_terms']
+                ]
+                self.logger.info(f"✓ Loaded {len(self.generic_tech_terms)} generic tech terms from CSV")
+            else:
+                self.generic_tech_terms = []
+                self.logger.warning("⚠ position_generic_tech_terms not found in CSV")
+            
+            # NEW: Load portal indicators
+            if 'position_portal_indicators' in keyword_lists:
+                self.portal_indicators = [
+                    kw.strip() for kw in keyword_lists['position_portal_indicators']
+                ]
+                self.logger.info(f"✓ Loaded {len(self.portal_indicators)} portal indicators from CSV")
+            else:
+                self.portal_indicators = []
+                self.logger.warning("⚠ position_portal_indicators not found in CSV")
+            
+            # NEW: Load false positives
+            if 'position_false_positives' in keyword_lists:
+                self.false_positives = [
+                    kw.lower().strip() for kw in keyword_lists['position_false_positives']
+                ]
+                self.logger.info(f"✓ Loaded {len(self.false_positives)} false positives from CSV")
+            else:
+                self.false_positives = []
+                self.logger.warning("⚠ position_false_positives not found in CSV")
+            
+            # NEW: Load company suffixes
+            if 'position_company_suffix' in keyword_lists:
+                self.company_suffixes = [
+                    kw.strip() for kw in keyword_lists['position_company_suffix']
+                ]
+                self.logger.info(f"✓ Loaded {len(self.company_suffixes)} company suffixes from CSV")
+            else:
+                self.company_suffixes = []
+                self.logger.warning("⚠ position_company_suffix not found in CSV")
                 
         except Exception as e:
             self.logger.error(f"Failed to load position filters from CSV: {str(e)}")
@@ -235,6 +275,10 @@ class PositionExtractor:
             self.company_prefixes = []
             self.core_keywords = set()
             self.marketing_fluff = []
+            self.generic_tech_terms = []
+            self.portal_indicators = []
+            self.false_positives = []
+            self.company_suffixes = []
     
     def _normalize_acronyms_in_text(self, text: str) -> str:
         """Normalize common acronym patterns BEFORE extraction
@@ -656,21 +700,18 @@ class PositionExtractor:
             self.logger.debug(f"❌ Position starts with Re: {position}")
             return False
         
-        # 3. REJECT: Company name patterns (ends with common suffixes)
-        company_suffixes = [' Software', ' Inc', ' LLC', ' Corp', ' Ltd', ' Portal', "'S Candidate Portal", "'s Candidate Portal"]
-        if any(position.endswith(suffix) for suffix in company_suffixes):
+        # 3. REJECT: Company name patterns (ends with common suffixes) - from CSV
+        if self.company_suffixes and any(position.lower().endswith(suffix.lower()) for suffix in self.company_suffixes):
             self.logger.debug(f"❌ Position looks like company name: {position}")
             return False
         
-        # 4. REJECT: Generic tech terms without role context
-        generic_tech_terms = ['Cloud Environments', 'Tech Stack', 'Software Engineering']
-        if position in generic_tech_terms:
+        # 4. REJECT: Generic tech terms without role context (from CSV)
+        if self.generic_tech_terms and position.lower() in [term.lower() for term in self.generic_tech_terms]:
             self.logger.debug(f"❌ Position is generic tech term: {position}")
             return False
         
-        # 5. REJECT: Portal/system names
-        portal_indicators = [' Portal', ' System', ' Platform', ' Dashboard']
-        if any(ind in position for ind in portal_indicators):
+        # 5. REJECT: Portal/system names (from CSV)
+        if self.portal_indicators and any(ind in position for ind in self.portal_indicators):
             self.logger.debug(f"❌ Position contains portal/system indicator: {position}")
             return False
         
@@ -733,14 +774,8 @@ class PositionExtractor:
         if not (has_suffix or has_trigger):
             return False
         
-        # Filter out common false positives
-        false_positives = [
-            'team', 'department', 'company', 'organization', 'group',
-            'please', 'thank', 'regards', 'sincerely', 'best',
-            'email', 'phone', 'contact', 'address'
-        ]
-        
-        if any(fp in position_lower for fp in false_positives):
+        # Filter out common false positives (from CSV)
+        if self.false_positives and any(fp in position_lower for fp in self.false_positives):
             return False
         
         return True

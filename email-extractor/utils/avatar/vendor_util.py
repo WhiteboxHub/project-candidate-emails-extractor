@@ -190,14 +190,15 @@ class VendorUtil:
             if not email and not linkedin:
                 return False
 
-            # Email validation
+            # Email validation using filter_repository (CSV-driven)
             if email:
                 if "@" not in email or "." not in email:
                     return False
-                email_lower = email.lower()
-                if any(x in email_lower for x in [
-                    "noreply", "no-reply", "info@", "support@", "admin@"
-                ]):
+                
+                # Use filter_repository to check against CSV patterns
+                from utils.filters.filter_repository import get_filter_repository
+                filter_repo = get_filter_repository()
+                if filter_repo.check_email(email) == 'block':
                     return False
 
             # LinkedIn validation
