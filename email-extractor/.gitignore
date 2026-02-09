@@ -21,6 +21,8 @@ ENV/
 
 # Test outputs
 test_results_*.json
+raw_positions_test_*.csv
+raw_positions_test_*.json
 
 # Logs
 *.log
