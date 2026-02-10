@@ -61,7 +61,7 @@ Log Activity
 
 1. **Clone Repository**
    ```bash
-   cd email-extractor-bot/email-extractor
+   cd project-candidate-emails-extractor
    ```
 
 2. **Create Virtual Environment**
@@ -102,7 +102,7 @@ Log Activity
 
 5. **Validate Setup**
    ```bash
-   python validate_setup.py
+   # validate_setup.py is currently unavailable
    ```
 
 ---
@@ -126,17 +126,7 @@ python service.py
 
 ### Test Mode (No Database Required)
 
-Test extraction on your personal Gmail account:
-
-```bash
-python test_my_account.py
-```
-
-**What it does:**
-- Connects to YOUR Gmail account (from `.env`)
-- Extracts vendor contacts from recent emails
-- Saves results to `test_results_<timestamp>.json`
-- Shows detailed extraction statistics
+[Note: test_my_account.py is currently unavailable]
 
 ---
 
@@ -181,15 +171,7 @@ All filtering rules (junk domains, recruiter keywords, patterns) are managed via
 ## 🧪 Testing & Validation
 
 ### Pre-Flight Check
-```bash
-python validate_setup.py
-```
-
-Validates:
-- Database connection
-- Required tables (`candidate_marketing`, `vendor_contact_extracts`, `job_types`, `job_activity_log`)
-- Python dependencies
-- SpaCy model installation
+[Note: validate_setup.py is currently unavailable]
 
 ### Diagnose Account
 ```bash
@@ -246,8 +228,6 @@ docker run --env-file .env \
 | Script | Purpose |
 |--------|---------|
 | `service.py` | Main production service |
-| `test_my_account.py` | Standalone test mode |
-| `validate_setup.py` | Pre-flight validation |
 | `diagnose_account.py` | IMAP connection troubleshooting |
 | `sync_keywords_to_csv.py` | Sync database filters to CSV |
 | `reset_tracker.py` | Reset UID tracker (reprocess emails) |
