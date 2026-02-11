@@ -96,14 +96,30 @@ class EmailExtractionService:
                 def __init__(self): self.uids = {}
                 def get_last_uid(self, email): return self.uids.get(email, 0)
                 def update_last_uid(self, email, uid): self.uids[email] = uid
-            self.uid_tracker = SimpleTracker()
+                self.uid_tracker = SimpleTracker()
         
+        # Initialize Workflow Logger
+        if self.api_client:
+            from ..persistence.workflow_logger import WorkflowLogger
+            self.workflow_logger = WorkflowLogger(self.api_client)
+        else:
+            self.workflow_logger = None
+
         self.logger.info("All components initialized successfully")
     
     def run(self):
         """Main execution method"""
         execution_metadata = {'candidates': []}
         
+        # Start workflow logging
+        if self.workflow_logger and self.run_id:
+            # Assuming workflow_id is available or defaults to 1 (or passed via config/args)
+            # For now using 1 as default or extracting from somewhere if possible.
+            # The user schema has workflow_id as BIGINT UNSIGNED NO.
+            # We might need to look up the workflow_id for "email_extraction"
+            workflow_id = 1 
+            self.workflow_logger.start_run(workflow_id, self.run_id)
+
         try:
             # Get candidates with email credentials via injected source
             candidates = self.candidate_source.get_active_candidates()
@@ -145,6 +161,18 @@ class EmailExtractionService:
                     candidate_result['error'] = str(e)
                 finally:
                     execution_metadata['candidates'].append(candidate_result)
+            # Calculate summary for JSON output as per user request
+            success_candidates = [c.get('email') for c in execution_metadata['candidates'] if c.get('status') == 'success']
+            failed_candidates = [c.get('email') for c in execution_metadata['candidates'] if c.get('status') == 'failed']
+            
+            execution_metadata['summary'] = {
+                'total_candidates': len(candidates),
+                'success_count': len(success_candidates),
+                'failure_count': len(failed_candidates),
+                'total_contacts_extracted': total_contacts,
+                'successful_candidates': success_candidates,
+                'failed_candidates': failed_candidates
+            }
             
             self.logger.info("=" * 80)
             self.logger.info(f"Extraction Complete - Total Contacts: {total_contacts}")
@@ -161,6 +189,18 @@ class EmailExtractionService:
                     records_processed=total_contacts,
                     records_failed=total_failed,
                     execution_metadata=execution_metadata
+                )
+            
+            # Update DB Logging
+            if self.workflow_logger and self.run_id:
+                status = 'success' if total_failed == 0 else 'partial_success'
+                if total_failed == len(candidates) and len(candidates) > 0:
+                    status = 'failed'
+                
+                self.workflow_logger.finish_run(
+                    self.run_id, status,
+                    records_processed=total_contacts,
+                    records_failed=total_failed
                 )
 
             # Save execution metadata to file
@@ -188,6 +228,17 @@ class EmailExtractionService:
                     error_summary=str(e)[:255],
                     execution_metadata=execution_metadata
                 )
+            
+            # DB Logging Failure
+            if self.workflow_logger and self.run_id:
+                self.workflow_logger.finish_run(
+                    self.run_id, 'failed',
+                    records_processed=0,
+                    records_failed=0,
+                    error_summary=str(e)[:255],
+                    error_details=str(e)
+                )
+
             raise
     
     def process_candidate(self, candidate: dict) -> int:
@@ -262,10 +313,14 @@ class EmailExtractionService:
                         clean_body = email_data.get('clean_body', self.cleaner.extract_body(email_data['message']))
                         
                         # extract_contacts returns a LIST of contacts
+                        # CRITICAL FIX: Extract subject for position/location extraction
+                        subject = email_data['message'].get('subject', '')
+                        
                         contacts_list = self.extractor.extract_contacts(
                             email_data['message'],
                             clean_body,
-                            source_email=email
+                            source_email=email,
+                            subject=subject
                         )
                         
                         # Add all valid contacts to the total list
