@@ -45,9 +45,9 @@ class MockDBClient:
             return [{
                 'id': 1,
                 'workflow_key': 'email_extractor',
-                'name': 'Test Workflow',
+                'name': 'Daily IMAP Contact/Post Extractor',
                 'status': 'active',
-                'credentials_list_sql': 'SELECT * FROM candidates',
+                'credentials_list_sql': 'SELECT c.id as candidate_id, cm.email, cm.password, cm.imap_password FROM candidate c JOIN candidate_marketing cm ON c.id = cm.candidate_id WHERE cm.run_email_extraction = 1',
                 'recipient_list_sql': None,
                 'parameters_config': {}
             }]
@@ -57,15 +57,29 @@ class MockDBClient:
                 {
                     'candidate_id': 101,
                     'email': 'test@example.com', 
-                    'password': 'secret_password',
-                    'imap_server': 'imap.gmail.com'
+                    'imap_password': 'secret_password_app_key'
                 }
             ]
         return []
 
     def execute_non_query(self, query, params=None):
         self.queries.append((query, params))
-        print(f"[MOCK DB] Executing Non-Query: {query} | Params: {params}")
+        print(f"[MOCK DB] Executing Non-Query:\n        {query.strip()}")
+        
+        if params:
+            formatted_params = []
+            for p in params:
+                if isinstance(p, str) and p.startswith('{') and p.endswith('}'):
+                    try:
+                        # Try to pretty print JSON strings
+                        parsed = json.loads(p)
+                        formatted_params.append(json.dumps(parsed, indent=2))
+                    except:
+                        formatted_params.append(repr(p))
+                else:
+                    formatted_params.append(repr(p))
+            
+            print(f"         | Params: {tuple(formatted_params)}")
         return 1
 
 class TestWorkflowExecution(unittest.TestCase):
@@ -163,4 +177,6 @@ class TestWorkflowExecution(unittest.TestCase):
             self.fail("Workflow did not attempt to save execution log to file.")
 
 if __name__ == '__main__':
-    unittest.main()
+    # Run without buffering to see prints
+    suite = unittest.TestLoader().loadTestsFromTestCase(TestWorkflowExecution)
+    unittest.TextTestRunner(verbosity=2, buffer=False).run(suite)

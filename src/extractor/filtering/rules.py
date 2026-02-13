@@ -1,9 +1,8 @@
 import re
-import joblib
-import os
 from typing import Dict, List
 import logging
 from ..filtering.repository import get_filter_repository
+from ..filtering.ml_filter import MLFilter
 
 logger = logging.getLogger(__name__)
 
@@ -26,26 +25,48 @@ class EmailFilter:
         
         # Load ML classifier if enabled
         self.use_ml = config.get('filters', {}).get('use_ml_classifier', False)
+        self.ml_filter = None
         if self.use_ml:
             self._load_ml_model()
     
     def _load_ml_model(self):
         """Load pre-trained ML classifier"""
-        try:
-            model_dir = self.config.get('filters', {}).get('ml_model_dir', '../models')
-            classifier_path = os.path.join(model_dir, 'classifier.pkl')
-            vectorizer_path = os.path.join(model_dir, 'vectorizer.pkl')
-            
-            if os.path.exists(classifier_path) and os.path.exists(vectorizer_path):
-                self.classifier = joblib.load(classifier_path)
-                self.vectorizer = joblib.load(vectorizer_path)
-                self.logger.info("ML classifier loaded successfully")
-            else:
-                self.logger.warning(f"ML model files not found in {model_dir}. ML filtering disabled.")
-                self.use_ml = False
-        except Exception as e:
-            self.logger.error(f"Error loading ML model: {str(e)}")
-            self.use_ml = False
+        model_dir = self.config.get('filters', {}).get('ml_model_dir', '../models')
+        ml_filter = MLFilter(model_dir=model_dir)
+        if ml_filter.load():
+            self.ml_filter = ml_filter
+            self.logger.info("ML filtering enabled")
+            return
+
+        self.logger.warning("ML filtering disabled due to missing or invalid model files")
+        self.ml_filter = None
+        self.use_ml = False
+
+    def _classify_with_ml(self, subject: str, body: str, from_email: str):
+        if not self.ml_filter:
+            return None
+        return self.ml_filter.predict_recruiter(subject=subject, body=body, from_email=from_email)
+
+    def _classify_with_rules(self, subject: str, body: str) -> bool:
+        """Rule-only recruiter classifier."""
+        subject_lower = (subject or "").lower()
+        body_lower = (body or "").lower()
+        text = f"{subject_lower} {body_lower}"
+
+        anti_keyword_count = sum(1 for kw in self.anti_recruiter_keywords if kw in text)
+        if anti_keyword_count >= 4:
+            return False
+
+        subject_keyword_count = sum(1 for kw in self.recruiter_keywords if kw in subject_lower)
+        body_keyword_count = sum(1 for kw in self.recruiter_keywords if kw in body_lower)
+
+        if subject_keyword_count >= 1:
+            return True
+        if body_keyword_count >= 2:
+            return True
+        if subject_keyword_count + body_keyword_count >= 1:
+            return True
+        return False
     
     def _extract_clean_email(self, from_header: str) -> str:
         """Extract email address from From header"""
@@ -86,46 +107,12 @@ class EmailFilter:
             return False
         
         # If ML classifier available, use it
-        if self.use_ml and self.classifier and self.vectorizer:
-            try:
-                features = self.vectorizer.transform([f"{subject} {body} {from_email}"])
-                prediction = self.classifier.predict(features)[0]
-                return prediction == 1
-            except Exception as e:
-                self.logger.error(f"ML classification error: {str(e)}")
-                return False
-        
-        # Smart keyword matching with separate subject/body analysis
-        subject_lower = subject.lower()
-        body_lower = body.lower()
-        text = f"{subject} {body}".lower()
-        
-        # Check anti-keywords (marketing indicators) - raised threshold
-        anti_keyword_count = sum(1 for kw in self.anti_recruiter_keywords if kw in text)
-        if anti_keyword_count >= 4:  # Raised from 2 to 4
-            self.logger.debug(f"Filtered: Marketing/Newsletter detected ({anti_keyword_count} anti-keywords)")
-            return False
-        
-        # Count recruiter keywords in subject (more reliable)
-        subject_keyword_count = sum(1 for kw in self.recruiter_keywords if kw in subject_lower)
-        
-        # Count recruiter keywords in body
-        body_keyword_count = sum(1 for kw in self.recruiter_keywords if kw in body_lower)
-        
-        # Smart matching rules:
-        # 1. Subject has 1+ keyword = likely recruiter
-        if subject_keyword_count >= 1:
-            return True
-        
-        # 2. Body has 2+ keywords = likely recruiter
-        if body_keyword_count >= 2:
-            return True
-        
-        # 3. At least 1 keyword total (lowered from 2)
-        if subject_keyword_count + body_keyword_count >= 1:
-            return True
-        
-        return False
+        if self.use_ml:
+            ml_result = self._classify_with_ml(subject, body, from_email)
+            if ml_result is not None:
+                return ml_result
+
+        return self._classify_with_rules(subject, body)
     
     def is_calendar_invite(self, email_message) -> bool:
         """Check if email is a calendar invite"""
