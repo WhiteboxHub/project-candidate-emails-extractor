@@ -12,6 +12,8 @@ class APIClient:
     Handles authentication and API requests
     """
     
+    DEFAULT_TIMEOUT = 120  # Increased from 30s to 120s as per user request
+    
     def __init__(self, base_url: str, email: str, password: str, employee_id: int):
         self.base_url = base_url.rstrip('/')
         self.email = email
@@ -46,7 +48,7 @@ class APIClient:
                 "grant_type": "password"  # Required by OAuth2 spec
             }
             
-            response = requests.post(login_url, data=form_data, timeout=30)
+            response = requests.post(login_url, data=form_data, timeout=self.DEFAULT_TIMEOUT)
             
             # Log response for debugging
             if response.status_code != 200:
@@ -103,7 +105,7 @@ class APIClient:
             url = f"{self.base_url}{endpoint}"
             headers = self._get_headers()
             
-            response = requests.get(url, headers=headers, params=params, timeout=30)
+            response = requests.get(url, headers=headers, params=params, timeout=self.DEFAULT_TIMEOUT)
             response.raise_for_status()
             
             return response.json()
@@ -127,7 +129,7 @@ class APIClient:
             url = f"{self.base_url}{endpoint}"
             headers = self._get_headers()
             
-            response = requests.post(url, headers=headers, json=data, timeout=30)
+            response = requests.post(url, headers=headers, json=data, timeout=self.DEFAULT_TIMEOUT)
             
             # Log error responses for debugging
             if response.status_code >= 400:
@@ -157,7 +159,7 @@ class APIClient:
             url = f"{self.base_url}{endpoint}"
             headers = self._get_headers()
             
-            response = requests.put(url, headers=headers, json=data, timeout=30)
+            response = requests.put(url, headers=headers, json=data, timeout=self.DEFAULT_TIMEOUT)
             response.raise_for_status()
             
             return response.json()
@@ -180,7 +182,7 @@ class APIClient:
             url = f"{self.base_url}{endpoint}"
             headers = self._get_headers()
             
-            response = requests.delete(url, headers=headers, timeout=30)
+            response = requests.delete(url, headers=headers, timeout=self.DEFAULT_TIMEOUT)
             response.raise_for_status()
             
             return response.json()

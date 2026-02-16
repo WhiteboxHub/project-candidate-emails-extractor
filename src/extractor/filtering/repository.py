@@ -17,16 +17,23 @@ class FilterRepository:
         
     def load_filters(self) -> bool:
         """Load filters from CSV first, fallback to API if CSV not available"""
-        # Try CSV first
-        csv_path = Path(__file__).parent.parent.parent / "keywords.csv"
-        
+        # Try CSV first (project root preferred)
+        project_root_csv = Path(__file__).resolve().parents[3] / "keywords.csv"
+        legacy_src_csv = Path(__file__).resolve().parents[2] / "keywords.csv"
+
+        csv_path = project_root_csv if project_root_csv.exists() else legacy_src_csv
+
         if csv_path.exists():
             try:
                 return self._load_from_csv(csv_path)
             except Exception as e:
                 self.logger.warning(f"Failed to load from CSV: {str(e)}, falling back to database")
         else:
-            self.logger.info(f"CSV file not found at {csv_path}, loading from database")
+            self.logger.info(
+                "CSV file not found at %s (or legacy %s), loading from database",
+                project_root_csv,
+                legacy_src_csv,
+            )
         
         # Fallback to database API
         return self._load_from_database()

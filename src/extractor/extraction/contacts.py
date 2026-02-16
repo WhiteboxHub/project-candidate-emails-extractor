@@ -438,11 +438,11 @@ class ContactExtractor:
             'email': ['regex'],
             'phone': ['regex'],
             'linkedin_id': ['regex'],
-            'name': ['spacy', 'gliner'],
-            'company': ['spacy', 'gliner'],
+            'name': ['gliner', 'spacy'],
+            'company': ['gliner', 'spacy'],
             'location': ['gliner', 'spacy'],
             'location_with_zip': ['custom'],  # Use custom location extractor
-            'job_position': ['custom'],  # Use custom position extractor
+            'job_position': ['custom', 'gliner', 'spacy'],  # Use custom position extractor
         }
         
         methods = field_methods.get(field, ['regex'])

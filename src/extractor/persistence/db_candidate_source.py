@@ -1,5 +1,5 @@
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional
 from ..core.database import get_db_client
 
 logger = logging.getLogger(__name__)
@@ -13,10 +13,15 @@ class DatabaseCandidateSource:
         self.db_client = get_db_client()
         self.credentials_sql = credentials_sql
 
-    def get_active_candidates(self) -> List[Dict]:
+    def get_active_candidates(
+        self,
+        candidate_id: Optional[int] = None,
+        candidate_email: Optional[str] = None,
+    ) -> List[Dict]:
         """
         Execute the stored SQL to get candidates.
-        Expecting columns: candidate_id, email, password, imap_server (optional)
+        SQL comes from automation_workflows.credentials_list_sql and can use
+        different aliases for the same logical fields.
         """
         if not self.credentials_sql:
             logger.warning("No credentials SQL provided to DatabaseCandidateSource")
@@ -27,18 +32,39 @@ class DatabaseCandidateSource:
             
             candidates = []
             for row in results:
-                # Map raw DB row to expected dictionary format
+                resolved_candidate_id = self._pick(
+                    row,
+                    ["candidate_id", "id", "candidate_marketing_id", "candidateMarketingId"],
+                )
+                resolved_email = self._pick(row, ["email", "imap_email", "candidate_email", "username"])
+                resolved_password = self._pick(
+                    row,
+                    ["imap_password", "password", "app_password", "email_password"],
+                )
+                resolved_imap_server = self._pick(
+                    row,
+                    ["imap_server", "email_server", "server"],
+                    default="imap.gmail.com",
+                )
+                resolved_name = self._pick(
+                    row,
+                    ["name", "full_name", "candidate_name"],
+                    default=resolved_email,
+                )
+
                 candidate = {
-                    'id': row.get('candidate_id'), # Using candidate_id as the main ID
-                    'candidate_id': row.get('candidate_id'),
-                    'email': row.get('email'),
-                    'imap_password': row.get('password'), # Mapping password to imap_password
-                    'imap_server': row.get('imap_server', 'imap.gmail.com'),
-                    'name': row.get('email') # Default name to email if not present
+                    "id": resolved_candidate_id,
+                    "candidate_id": resolved_candidate_id,
+                    "email": resolved_email,
+                    "imap_password": resolved_password,
+                    "imap_server": resolved_imap_server,
+                    "name": resolved_name,
                 }
                 
-                # Basic validation
-                if candidate.get('email') and candidate.get('imap_password'):
+                if not self._matches_candidate_filter(candidate, candidate_id, candidate_email):
+                    continue
+
+                if candidate.get("email") and candidate.get("imap_password"):
                     candidates.append(candidate)
                 else:
                     logger.warning(f"Skipping invalid candidate row: {row}")
@@ -48,4 +74,31 @@ class DatabaseCandidateSource:
             
         except Exception as e:
             logger.error(f"Error fetching candidates from database: {e}")
-            return [] 
+            return []
+
+    def _pick(self, row: Dict, keys: List[str], default=None):
+        for key in keys:
+            if key in row and row.get(key) not in (None, ""):
+                return row.get(key)
+        return default
+
+    def _matches_candidate_filter(
+        self,
+        candidate: Dict,
+        candidate_id: Optional[int],
+        candidate_email: Optional[str],
+    ) -> bool:
+        if candidate_id is not None:
+            current_id = candidate.get("candidate_id")
+            try:
+                if current_id is None or int(current_id) != int(candidate_id):
+                    return False
+            except (TypeError, ValueError):
+                return False
+
+        if candidate_email:
+            current_email = (candidate.get("email") or "").strip().lower()
+            if current_email != candidate_email.strip().lower():
+                return False
+
+        return True
