@@ -54,7 +54,7 @@ class JobPersistence:
         """
         try:
             self.api_client.put(
-                f"/api/raw-positions/{raw_id}", 
+                f"/api/raw-positions/{raw_id}/", 
                 {"processing_status": status}
             )
             return True

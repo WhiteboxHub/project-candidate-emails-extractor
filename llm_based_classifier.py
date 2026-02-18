@@ -27,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger("llm_classifier")
 
 class LLMJobClassifyOrchestrator:
-    def __init__(self, dry_run: bool = False, batch_size: int = 10, threshold: float = 0.7):
+    def __init__(self, dry_run: bool = False, batch_size: int =10, threshold: float = 0.7):
         self.dry_run = dry_run
         self.batch_size = batch_size
         self.audit_log = Path("classification_audit_llm.log")
@@ -39,7 +39,7 @@ class LLMJobClassifyOrchestrator:
             self.persistence = JobPersistence(self.api_client)
             self.preprocessor = BERTPreprocessor()
             self.classifier = LLMJobClassifier(threshold=threshold)
-            logger.info("✓ LLM components initialized (Qwen2.5-0.5B)")
+            logger.info("Local LLM components initialized")
         except Exception as e:
             logger.error(f"Failed to initialize components: {e}")
             sys.exit(1)
@@ -66,6 +66,8 @@ class LLMJobClassifyOrchestrator:
                         location=raw_job.get('raw_location'),
                         description=raw_job.get('raw_description')
                     )
+
+                    logger.info(f"Processing raw job ID {raw_id}: {input_text}")
                     
                     # 3. Classify with LLM
                     result = self.classifier.classify(input_text)
@@ -83,7 +85,7 @@ class LLMJobClassifyOrchestrator:
                             "title": raw_job.get('raw_title', 'Untitled Position'),
                             "company_name": raw_job.get('raw_company', 'Unknown Company'),
                             "location": raw_job.get('raw_location'),
-                            "source": "email_bot_llm_qwen",
+                            "source": "email_bot_llm_local",
                             "raw_position_id": raw_id,
                             "confidence_score": result['score'],
                             "classification_label": result['label']
@@ -120,9 +122,9 @@ class LLMJobClassifyOrchestrator:
             f.write(entry)
 
 def main():
-    parser = argparse.ArgumentParser(description="Classify raw job listings using Qwen LLM")
+    parser = argparse.ArgumentParser(description="Classify raw job listings using Local LLM")
     parser.add_argument("--dry-run", action="store_true", help="Run without writing to DB/API")
-    parser.add_argument("--batch-size", type=int, default=5, help="Number of records per batch (LLM is slower than BERT)")
+    parser.add_argument("--batch-size", type=int, default=10, help="Number of records per batch (LLM is slower than BERT)")
     parser.add_argument("--threshold", type=float, default=0.7, help="Confidence threshold")
     args = parser.parse_args()
     

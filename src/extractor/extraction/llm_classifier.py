@@ -2,99 +2,124 @@ import logging
 import os
 import json
 import re
+import httpx
 from typing import Dict, List, Optional
-from groq import Groq
 
 logger = logging.getLogger(__name__)
 
 class LLMJobClassifier:
     """
-    Classifier using Groq API (Llama 3.1) to validate job positions.
+    Classifier using a Local LLM (via Ollama/FastAPI) to validate job positions.
     Uses generative prompting to provide reasoning and labels.
     """
     
     def __init__(
         self, 
-        model_name: str = "llama-3.1-8b-instant", 
+        base_url: str = "http://localhost:8000", 
         threshold: float = 0.7
     ):
         self.logger = logging.getLogger(__name__)
         self.threshold = threshold
-        self.model_name = model_name
+        self.base_url = base_url.rstrip('/')
+        self.generate_endpoint = f"{self.base_url}/generate"
         
-        # Initialize Groq
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            self.logger.error("GROQ_API_KEY not found in environment variables")
-            # We don't raise here to allow the orchestrator to handle the missing key gracefully if needed
-            # but classify will fail later if not fixed.
-            
-        self.client = Groq(api_key=api_key) if api_key else None
-        self.logger.info(f"✓ Groq LLM initialized with model: {model_name}")
+        self.logger.info(f"Local LLM initialized at: {self.generate_endpoint}")
 
     def build_system_prompt(self) -> str:
         """
-        Constructs the system instruction for classification.
+        Constructs a strict system instruction for JSON-only classification.
         """
-        return (
-            "You are an expert recruitment assistant specializing in data quality.\n"
-            "Your task is to categorize a text block as either a 'valid_job' or 'junk'.\n\n"
-            "STRICT CRITERIA:\n"
-            "1. 'valid_job':\n"
-            "   - Must describe a specific, open job position.\n"
-            "   - Must include a title and some requirements or duties.\n\n"
-            "2. 'junk':\n"
-            "   - Text that is purely an email signature, footer, or legal disclaimer.\n"
-            "   - General company advertisements without a specific role.\n"
-            "   - Newsletters, spam, or broken text fragments.\n\n"
-            "OUTPUT FORMAT:\n"
-            "You must respond ONLY with a valid JSON object. Do not include any other text.\n"
-            "Example JSON:\n"
-            "{\n"
-            "  \"reasoning\": \"One sentence explanation.\",\n"
-            "  \"label\": \"valid_job\" or \"junk\",\n"
-            "  \"confidence\": 0.0 to 1.0\n"
-            "}"
-        )
 
+        return (
+            "You are a strict JSON generator and expert recruitment assistant.\n"
+            "Your task is to classify the given text into ONE of two categories:\n"
+            "- valid_job\n"
+            "- junk\n\n"
+
+            "CLASSIFICATION RULES:\n"
+            "valid_job:\n"
+            "- Must describe a SPECIFIC open position (e.g., 'Senior Python Developer', 'Data Analyst')\n"
+            "- Must include specific responsibilities or requirements for that role\n"
+            "- NOT a general 'we are hiring' announcement\n\n"
+
+            "junk:\n"
+            "- General 'We are hiring' or 'Join our team' posts without specific role details\n"
+            "- Lists of multiple potential roles without details (e.g., 'Hiring Java, .NET, QA')\n"
+            "- Email signatures\n"
+            "- Company advertisements\n"
+            "- Candidate profiles looking for jobs\n"
+            "- Spam, newsletters, marketing\n\n"
+
+            "CRITICAL OUTPUT RULES:\n"
+            "- Output ONLY valid JSON\n"
+            "- No explanations outside JSON\n"
+            "- No markdown\n"
+            "- No extra text\n"
+            "- No prefixes or suffixes\n\n"
+
+            "OUTPUT FORMAT:\n"
+            "{\n"
+            "  \"reasoning\": \"One sentence explanation\",\n"
+            "  \"label\": \"valid_job\" or \"junk\",\n"
+            "  \"confidence\": number between 0.0 and 1.0\n"
+            "}\n\n"
+
+            "OUTPUT JSON:"
+        )
     def classify(self, text: str) -> Dict:
         """
-        Perform Groq-based classification.
+        Perform local LLM-based classification.
         """
         if not text:
-            return {'label': 'empty', 'score': 0.0, 'is_valid': False}
+            return {'label': 'junk', 'confidence': 1.0, 'reasoning': 'Empty text'}
 
-        if not self.client:
-            return {'label': 'error', 'score': 0.0, 'is_valid': False, 'reason': 'GROQ_API_KEY missing'}
+        # Fix #3: Add junk keyword filter before saving/processing
+        junk_keywords = [
+            "we are hiring", "join our team", "hiring now", "open positions", 
+            "click here", "subscribe", "newsletter", "follow us"
+        ]
+        text_lower = text.lower()
+        if len(text.split()) < 10:  # Too short
+             return {'label': 'junk', 'confidence': 1.0, 'reasoning': 'Text too short'}
+             
+        # If text is dominated by junk keywords without specific role details
+        # This is a simple heuristic; LLM is better, but this saves tokens
+        # We'll let LLM handle the nuance, but if it's JUST "We are hiring" we skip
+        if any(text_lower == k for k in junk_keywords):
+             return {'label': 'junk', 'confidence': 0.9, 'reasoning': 'Generic hiring slogan'}
 
         try:
             # Truncate text to keep prompt within reasonable limits
-            # Llama 3.1 has a large context, but let's be efficient
             if len(text) > 4000:
                 text = text[:4000]
 
-            completion = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": self.build_system_prompt()},
-                    {"role": "user", "content": f"Classify this text:\n\n{text}"}
-                ],
-                temperature=0.0,
-                max_tokens=200,
-                response_format={"type": "json_object"}
-            )
+            payload = {
+                "prompt": f"{self.build_system_prompt()}\n\nClassify this text:\n\n{text}",
+                "system": self.build_system_prompt() # If the local API supports a system field
+            }
             
-            output_text = completion.choices[0].message.content.strip()
+            # Note: We use a synchronous request here to match the existing BERT/Groq implementation pattern
+            # in the orchestrator, but httpx allows for easy async later if needed.
+            with httpx.Client(timeout=60.0) as client:
+                response = client.post(self.generate_endpoint, json=payload)
+                response.raise_for_status()
+                data = response.json()
+            
+            # The structure of 'data' depends on the local API server's implementation.
+            # Usually, local wrappers return the text in a 'text' or 'response' key.
+            output_text = data.get('text', data.get('response', data.get('generated_text', data.get('output', '')))).strip()
+            
+            # Log the raw response for debugging
+            self.logger.info(f"Raw LLM response (first 300 chars): {output_text[:300]}")
 
-            # Parse JSON from response
-            result = json.loads(output_text)
-
-            logger.info(f"LLM Classification reasoning for raw job ID 'reasoning': {result.get('reasoning', '')}")
+            # Attempt to parse JSON from response if the local model didn't return pure JSON
+            result = self._parse_json_from_text(output_text)
+            
+            self.logger.info(f"LLM Classification reasoning for raw job: {result.get('reasoning', '')}")
 
             label = result.get('label', 'junk').lower()
             score = float(result.get('confidence', 0.5))
             
-            # Check for valid_job label
             is_valid = (label == 'valid_job') and (score >= self.threshold)
             
             return {
@@ -106,8 +131,44 @@ class LLMJobClassifier:
             }
             
         except Exception as e:
-            self.logger.error(f"Groq LLM Classification error: {e}")
+            self.logger.error(f"Local LLM Classification error: {e}")
             return {'label': 'error', 'score': 0.0, 'is_valid': False}
+
+    def _parse_json_from_text(self, text: str) -> Dict:
+        """
+        Helper to extract JSON from text output if the model was chatty.
+        Handles markdown code blocks, extra text, and malformed responses.
+        """
+        try:
+            # First, try direct JSON parse
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        
+        # Try to extract from markdown code block
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+        
+        # Try to find any JSON object in the text
+        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group())
+            except json.JSONDecodeError:
+                pass
+        
+        # Log the actual response for debugging
+        self.logger.warning(f"Failed to parse JSON. LLM returned: {text[:500]}")
+        
+        # Fallback: try to extract label from text
+        if "valid_job" in text.lower() and "junk" not in text.lower()[:50]:
+            return {'label': 'valid_job', 'confidence': 0.8, 'reasoning': 'Extracted from non-JSON text'}
+        
+        return {'label': 'junk', 'confidence': 0.8, 'reasoning': 'Failed to parse JSON'}
 
     def batch_classify(self, texts: List[str]) -> List[Dict]:
         return [self.classify(t) for t in texts]
