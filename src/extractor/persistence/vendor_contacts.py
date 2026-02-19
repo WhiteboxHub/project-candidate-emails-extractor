@@ -55,9 +55,35 @@ class VendorUtil:
             return set()
 
 
+    def get_globally_existing_emails(self, emails: List[str]) -> set:
+        """
+        Check which emails from the provided list already exist in the database globally.
+        """
+        if not emails:
+            return set()
+            
+        try:
+            # Create placeholders for IN clause
+            placeholders = ', '.join(['%s'] * len(emails))
+            query = f"SELECT email FROM vendor_contact_extracts WHERE email IN ({placeholders})"
+            
+            # Execute query with the list of emails
+            results = self.db_client.execute_query(query, tuple(emails))
+            
+            existing = set()
+            for row in results:
+                if row.get('email'):
+                    existing.add(row['email'].strip().lower())
+            
+            return existing
+        except Exception as e:
+            self.logger.error(f"Failed to check global existing emails: {e}")
+            return set()
+
     def save_contacts(self, contacts: List[Dict], candidate_id: Optional[int] = None) -> Dict[str, int]:
         """
-        Persist filtered contacts and raw positions in bulk.
+        Persist filtered contacts and related raw positions in bulk.
+        Only saves positions for NEW contacts (not globally existing).
 
         Returns:
             Dict with keys:
@@ -101,7 +127,25 @@ class VendorUtil:
             self.logger.info("No vendor/recruiter contacts after validation")
             return result
 
-        bulk_contacts = self._build_vendor_contacts_payload(filtered_contacts)
+        # --- NEW LOGIC: Filter against GLOBAL database existence ---
+        # Collect all valid emails to check
+        candidate_emails = [c.get("email").strip().lower() for c in filtered_contacts if c.get("email")]
+        # Fetch which of these already exist
+        existing_global_emails = self.get_globally_existing_emails(candidate_emails)
+        
+        truly_new_contacts = [c for c in filtered_contacts if (c.get("email") or "").strip().lower() not in existing_global_emails]
+        result["contacts_skipped"] += (len(filtered_contacts) - len(truly_new_contacts))
+            
+        # --- NEW: Save to automation_contact_extracts for audit/history ---
+        # We save ALL valid contacts here, marking them as 'new' or 'duplicate'
+        self.insert_contact_extracts(filtered_contacts, existing_global_emails, candidate_id)
+
+        if not truly_new_contacts:
+            self.logger.info("No truly new contacts found. Only duplicates recorded in audit.")
+            return result
+            
+        # Use truly_new_contacts for both contacts and positions
+        bulk_contacts = self._build_vendor_contacts_payload(truly_new_contacts)
         if not bulk_contacts:
             self.logger.info("No contacts prepared for vendor_contact bulk insert")
             return result
@@ -119,7 +163,7 @@ class VendorUtil:
         if not candidate_id:
             return result
 
-        raw_job_listings = self._build_raw_job_listings_payload(filtered_contacts, candidate_id)
+        raw_job_listings = self._build_raw_job_listings_payload(truly_new_contacts, candidate_id)
         if not raw_job_listings:
             self.logger.info("No raw job listings produced from filtered vendor contacts")
             return result
@@ -193,6 +237,49 @@ class VendorUtil:
                 }
             )
         return payload
+
+    def insert_contact_extracts(self, contacts: List[Dict], existing_global_emails: set, candidate_id: Optional[int] = None):
+        """
+        Directly inserts extracted contacts into automation_contact_extracts table.
+        """
+        if not contacts:
+            return
+
+        query = """
+            INSERT INTO automation_contact_extracts (
+                full_name, email, phone, company_name, job_title, 
+                city, postal_code, linkedin_id, source_type, 
+                source_reference, raw_payload, processing_status, classification
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        insert_count = 0
+        for contact in contacts:
+            try:
+                email = (contact.get("email") or "").strip().lower()
+                status = "duplicate" if email in existing_global_emails else "new"
+                
+                params = (
+                    contact.get("name"),
+                    contact.get("email"),
+                    contact.get("phone"),
+                    contact.get("company"),
+                    contact.get("job_position"),
+                    contact.get("location"), # Map full location to city for now as planned
+                    contact.get("zip_code"),  # map to postal_code
+                    contact.get("linkedin_id"),
+                    "email", # source_type
+                    contact.get("source"), # source_reference (candidate email)
+                    json.dumps(contact, default=str),
+                    status, # processing_status
+                    "unknown" # classification
+                )
+                self.db_client.execute_non_query(query, params)
+                insert_count += 1
+            except Exception as e:
+                self.logger.error(f"Failed to insert into automation_contact_extracts: {e}")
+
+        self.logger.info(f"Inserted {insert_count} contacts into automation_contact_extracts")
 
     def _extract_insert_skip_counts(self, response: Dict, default_inserted: int) -> tuple:
         if isinstance(response, dict):

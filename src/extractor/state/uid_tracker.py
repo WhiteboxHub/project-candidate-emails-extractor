@@ -69,7 +69,7 @@ class UIDTracker:
         Returns:
             Last UID string or None if first run
         """
-        email = email.lower()
+        email = email.strip().lower()
         
         if email not in self.data:
             logger.info(f"First run for {email} - will process all emails")
@@ -89,8 +89,27 @@ class UIDTracker:
             email: Email address (lowercase)
             uid: Last processed UID
         """
-        email = email.lower()
+        email = email.strip().lower()
         
+        try:
+            new_uid_int = int(uid)
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid UID format for update: {uid} for {email}")
+            return
+
+        # Check existing UID
+        current_data = self.data.get(email)
+        if current_data:
+            last_uid_str = current_data.get('last_uid')
+            try:
+                if last_uid_str and int(last_uid_str) >= new_uid_int:
+                    # Current stored UID is already higher or equal; do not regress
+                    logger.debug(f"Skipping UID update for {email}: stored {last_uid_str} >= new {uid}")
+                    return
+            except (ValueError, TypeError):
+                # If stored UID is corrupted, we allow overwrite
+                pass
+
         # Update data
         self.data[email] = {
             'last_uid': str(uid),
@@ -113,7 +132,7 @@ class UIDTracker:
         Args:
             email: Email address to remove
         """
-        email = email.lower()
+        email = email.strip().lower()
         
         if email in self.data:
             del self.data[email]

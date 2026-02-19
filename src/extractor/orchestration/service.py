@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
@@ -15,6 +16,7 @@ from ..orchestration.candidate_runner import CandidateRunner
 from ..persistence.db_candidate_source import DatabaseCandidateSource
 from ..persistence.job_activity import JobActivityLogUtil
 from ..persistence.vendor_contacts import VendorUtil
+from ..reporting.email_reporter import EmailReporter
 from ..state.uid_tracker import get_uid_tracker
 from ..state.cache import DeduplicationCache
 from ..workflow.manager import WorkflowManager
@@ -51,6 +53,7 @@ class EmailExtractionService:
         self.uid_tracker = None
         self.deduplication_cache = None
         self.candidate_runner = None
+        self.email_reporter = None
 
         self._initialize_components()
 
@@ -94,6 +97,17 @@ class EmailExtractionService:
             connector_cls=GmailIMAPConnector,
             reader_cls=EmailReader,
         )
+
+        # Initialize email reporter from environment variables
+        smtp_config = {
+            "SMTP_SERVER": os.getenv("SMTP_SERVER"),
+            "SMTP_PORT": os.getenv("SMTP_PORT", "587"),
+            "SMTP_USERNAME": os.getenv("SMTP_USERNAME"),
+            "SMTP_PASSWORD": os.getenv("SMTP_PASSWORD"),
+            "REPORT_FROM_EMAIL": os.getenv("REPORT_FROM_EMAIL"),
+            "REPORT_TO_EMAIL": os.getenv("REPORT_TO_EMAIL"),
+        }
+        self.email_reporter = EmailReporter(smtp_config)
         self.logger.info("Service components initialized")
 
     def run(
@@ -173,6 +187,14 @@ class EmailExtractionService:
             if total_failed == len(candidates):
                 overall_status = "failed"
 
+            # Collect errors for status update
+            error_summary = None
+            error_details = None
+            if total_failed > 0:
+                failed_results = [c for c in execution_metadata["candidates"] if c.get("status") != "success"]
+                error_summary = f"{total_failed} candidates failed"
+                error_details = "\n".join([f"{c.get('candidate_email')}: {c.get('error')}" for c in failed_results])
+
             summary = self._finalize_summary(
                 execution_metadata,
                 total_contacts,
@@ -184,12 +206,16 @@ class EmailExtractionService:
                 status=overall_status,
                 records_processed=total_contacts,
                 records_failed=total_failed,
+                error_summary=error_summary,
+                error_details=error_details,
                 execution_metadata=summary,
             )
             self._persist_execution_log(summary)
             # Generate and save JSON report
             report = self._generate_json_report(summary)
             self._save_json_report(report)
+            # Send email report
+            self.email_reporter.send_report(report)
             return summary
         except Exception as error:
             self.logger.error("Service execution failed: %s", error, exc_info=True)
@@ -213,6 +239,8 @@ class EmailExtractionService:
             # Generate and save JSON report even on failure
             report = self._generate_json_report(summary)
             self._save_json_report(report)
+            # Send email report even on failure
+            self.email_reporter.send_report(report)
             raise
 
     def _update_run_status(
@@ -245,8 +273,8 @@ class EmailExtractionService:
         total_emails_fetched: int,
     ) -> Dict:
         candidates = execution_metadata.get("candidates", [])
-        success_candidates = [item.get("email") for item in candidates if item.get("status") == "success"]
-        failed_candidates = [item.get("email") for item in candidates if item.get("status") != "success"]
+        success_candidates = [item.get("candidate_email") for item in candidates if item.get("status") == "success"]
+        failed_candidates = [item.get("candidate_email") for item in candidates if item.get("status") != "success"]
         execution_metadata["summary"] = {
             "total_candidates": len(candidates),
             "success_count": len(success_candidates),

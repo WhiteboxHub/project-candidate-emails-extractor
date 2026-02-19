@@ -20,7 +20,7 @@ from typing import Dict
 from dotenv import load_dotenv
 
 # Load .env file BEFORE any other imports that use environment variables
-load_dotenv()
+load_dotenv() 
 
 # Add src to path to allow absolute imports if running from root
 sys.path.insert(0, str(Path(__file__).parent.parent))

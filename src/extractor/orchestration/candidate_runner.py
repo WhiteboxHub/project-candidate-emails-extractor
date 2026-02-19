@@ -125,6 +125,11 @@ class CandidateRunner:
             last_uid = self.uid_tracker.get_last_uid(email)
             start_index = 0
 
+            # Track the highest UID seen so far to prevent overwriting with lower UIDs from older batches
+            high_water_mark_uid = 0
+            if last_uid and str(last_uid).isdigit():
+                high_water_mark_uid = int(last_uid)
+
             while True:
                 emails, next_start_index = reader.fetch_emails(
                     since_uid=last_uid,
@@ -188,9 +193,12 @@ class CandidateRunner:
                         )
 
                 if emails:
-                    max_uid = max(int(item["uid"]) for item in emails)
-                    self.uid_tracker.update_last_uid(email, str(max_uid))
-                    last_processed_uid = str(max_uid)  # Track for reporting
+                    batch_max_uid = max(int(item["uid"]) for item in emails)
+                    # Only update if we found a strictly higher UID than we've ever seen/stored
+                    if batch_max_uid > high_water_mark_uid:
+                        high_water_mark_uid = batch_max_uid
+                        self.uid_tracker.update_last_uid(email, str(high_water_mark_uid))
+                        last_processed_uid = str(high_water_mark_uid)
 
                 if next_start_index is None:
                     break
