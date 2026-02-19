@@ -9,7 +9,8 @@ A production-ready email processing service that automatically extracts recruite
 ## 🎯 Features
 
 - **Multi-Method Extraction**: Regex → SpaCy → GLiNER fallback pipeline for maximum accuracy
-- **Smart Filtering**: Database-driven junk/recruiter detection with ML classifier
+- **Smart Filtering**: Database-driven junk/recruiter detection with BERT and LLM classifiers
+- **LLM Job Classification**: High-accuracy job validation using local LLM (Ollama/FastAPI)
 - **Zero-Shot NER**: GLiNER model extracts contacts without predefined patterns
 - **Multiple Contact Sources**: Extracts from From, Reply-To, Sender, CC, and calendar invites
 - **Duplicate Prevention**: Automatic deduplication by email and LinkedIn ID
@@ -109,20 +110,18 @@ Log Activity
 
 ## 🚀 Usage
 
-### Production Mode (Database-Driven)
-
-Run the service to process all candidates in the database:
+### Job Classification (Local LLM)
+Process and validate all raw job positions in a continuous loop using a local LLM (Ollama-backed). One command will process thousands of records by fetching them batch by batch until none are left:
 
 ```bash
-python service.py
+python llm_based_classifier.py --batch-size 15
 ```
 
-**What it does:**
-- Fetches candidates from `candidate_marketing` table
-- Connects to each candidate's Gmail via IMAP
-- Processes emails incrementally (UID tracking)
-- Saves extracted contacts to `vendor_contact_extracts`
-- Logs activity to `job_activity_log`
+**Key Features:**
+- **Deterministic Output**: Enforces prompt-based JSON generation for reliable parsing.
+- **Fail-Safe Persistence**: Updates raw records to `parsed` only after successful classification AND database save.
+- **Clean Logging**: Text-based terminal output with progress indicators and role inspection summaries.
+- **Dry Run**: Test the logic without modifying data: `python llm_based_classifier.py --dry-run`.
 
 ### Test Mode (No Database Required)
 
@@ -228,6 +227,7 @@ docker run --env-file .env \
 | Script | Purpose |
 |--------|---------|
 | `service.py` | Main production service |
+| `llm_based_classifier.py` | LLM-powered job classification engine |
 | `diagnose_account.py` | IMAP connection troubleshooting |
 | `sync_keywords_to_csv.py` | Sync database filters to CSV |
 | `reset_tracker.py` | Reset UID tracker (reprocess emails) |
