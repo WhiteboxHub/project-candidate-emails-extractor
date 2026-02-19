@@ -14,15 +14,16 @@ class JobPersistence:
         self.api_client = api_client
         self.logger = logging.getLogger(__name__)
 
-    def fetch_raw_jobs(self, limit: int = 50) -> List[Dict]:
+    def fetch_raw_jobs(self, limit: int = 50, skip: int = 0) -> List[Dict]:
         """
         Fetch raw job listings with status 'new'.
+        Supports skip-based pagination.
         """
         try:
-            self.logger.info(f"Fetching up to {limit} raw jobs with status 'new'")
+            self.logger.info(f"Fetching up to {limit} raw jobs (skip={skip}) with status 'new'")
             response = self.api_client.get(
                 "/api/raw-positions/", 
-                params={"processing_status": "new", "limit": limit}
+                params={"processing_status": "new", "limit": limit, "skip": skip}
             )
             
             # Extract results based on common API patterns
@@ -43,7 +44,7 @@ class JobPersistence:
             if len(filtered_jobs) < len(jobs):
                 self.logger.warning(f"Filtered out {len(jobs) - len(filtered_jobs)} records that were not 'new'")
                 
-            return filtered_jobs
+            return filtered_jobs, len(jobs)
             
         except Exception as e:
             self.logger.error(f"Failed to fetch raw jobs: {e}")

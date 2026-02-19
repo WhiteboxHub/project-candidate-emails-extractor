@@ -45,7 +45,7 @@ class JobClassifyOrchestrator:
         
         while True:
             # 1. Fetch raw jobs
-            raw_jobs = self.persistence.fetch_raw_jobs(limit=self.batch_size)
+            raw_jobs, _ = self.persistence.fetch_raw_jobs(limit=self.batch_size)
             if not raw_jobs:
                 logger.info("No new raw jobs to process. Exiting.")
                 break

@@ -27,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger("llm_classifier")
 
 class LLMJobClassifyOrchestrator:
-    def __init__(self, dry_run: bool = False, batch_size: int = 15, threshold: float = 0.7):
+    def __init__(self, dry_run: bool = False, batch_size: int = 20, threshold: float = 0.7):
         self.dry_run = dry_run
         self.batch_size = batch_size
         self.audit_log = Path("classification_audit_llm.log")
@@ -48,18 +48,37 @@ class LLMJobClassifyOrchestrator:
         print("\n" + "="*60)
         print(" STARTING LLM JOB CLASSIFICATION ENGINE")
         print("="*60)
-        logger.info(f"Mode: {'DRY RUN' if self.dry_run else 'PRODUCTION'} | Batch: {self.batch_size}")
+        logger.info(f"Mode:----- {'DRY RUN' if self.dry_run else 'PRODUCTION'} | Batch: {self.batch_size}")
         
+        current_skip = 0
         while True:
-            # 1. Fetch raw jobs
-            raw_jobs = self.persistence.fetch_raw_jobs(limit=self.batch_size)
-            if not raw_jobs:
-                print("\n" + "-"*60)
-                print(" No new jobs to process. System idling.")
-                print("-"*60 + "\n")
-                break
+            # 1. Fetch raw jobs (with pagination skip support)
+            raw_jobs, total_fetched = self.persistence.fetch_raw_jobs(limit=self.batch_size, skip=current_skip)
             
-            print(f"\nProcessing batch of {len(raw_jobs)} candidates...")
+            if not raw_jobs:
+                if total_fetched > 0:
+                    # Batch was full of parsed records, skip them and continue
+                    current_skip += total_fetched
+                    continue
+                    
+                # If we were using skip and got nothing at all, maybe try skip=0 once more before quitting
+                if current_skip > 0:
+                    logger.info("No jobs found with skip. Checking from the beginning...")
+                    raw_jobs, total_fetched = self.persistence.fetch_raw_jobs(limit=self.batch_size, skip=0)
+                    current_skip = 0
+                    if not raw_jobs:
+                        break
+                else:
+                    print("\n" + "-"*60)
+                    print(" No new jobs to process. System idling.")
+                    print("-"*60 + "\n")
+                    break
+            
+            # If after client-side filtering we have nothing to process, we must skip ahead
+            # this happens if the API is ignoring the processing_status filter
+            processed_in_batch = 0
+            
+            print(f"\nProcessing batch of {len(raw_jobs)} candidates (Current Skip: {current_skip})...")
             
             for i, raw_job in enumerate(raw_jobs, 1):
                 raw_id = raw_job.get('id')
@@ -85,13 +104,30 @@ class LLMJobClassifyOrchestrator:
                     # Audit logging
                     self._log_audit(raw_id, result)
                     
+                    processed_in_batch += 1
+
                     if result['is_valid']:
                         # 4. Prepare and Save Valid Job
+                        # Extract extra metadata from payload if available
+                        payload = raw_job.get('raw_payload') or {}
+                        if isinstance(payload, str):
+                            import json
+                            try:
+                                payload = json.loads(payload)
+                            except:
+                                payload = {}
+
                         job_data = {
                             "title": title[:200], # Safety truncate
+                            "description": raw_job.get('raw_description'),
                             "company_name": company[:200],
-                            "location": raw_job.get('raw_location'),
+                            "employment_type": payload.get('employment_type', 'full_time'),
+                            "work_mode": payload.get('work_mode', 'hybrid'),
                             "source": "email_bot_llm_local",
+                            "external_id": str(payload.get('post_id') or raw_job.get('source_uid') or raw_id),
+                            "location": raw_job.get('raw_location'),
+                            "country": payload.get('country', 'USA'),
+                            "url": payload.get('url') or payload.get('link') or "",
                             "raw_position_id": raw_id,
                             "confidence_score": result['score'],
                             "classification_label": result['label']
@@ -100,7 +136,7 @@ class LLMJobClassifyOrchestrator:
                         if not self.dry_run:
                             save_success = self.persistence.save_valid_job(job_data)
                             if save_success:
-                                logger.info(f"       Saved to job_listing table")
+                                logger.info(f"       Saved to job_listing table with full metadata")
                                 # 5. Mark as processed ONLY after successful save
                                 status_success = self.persistence.update_raw_status(raw_id, "parsed")
                                 if status_success:
@@ -108,7 +144,10 @@ class LLMJobClassifyOrchestrator:
                             else:
                                 logger.error(f"       Failed to persist job. Status remains 'new'.")
                         else:
-                            print(f"      [DRY RUN] Would save to database.")
+                            print(f"      [DRY RUN] Would save to database with following metadata:")
+                            print(f"                Ext ID: {job_data['external_id']}")
+                            print(f"                URL   : {job_data['url']}")
+                            print(f"                Mode  : {job_data['work_mode']}")
                     else:
                         # Even if junk, we mark as parsed so we don't pick it up again
                         if not self.dry_run:
@@ -121,6 +160,11 @@ class LLMJobClassifyOrchestrator:
                 except Exception as e:
                     logger.error(f" Error processing ID {raw_id}: {e}")
                     continue
+            
+            # Smart Pagination: Always move forward by the number of records we looked at
+            # This ensures we don't get stuck on the same page of already-parsed records
+            # if the API's processing_status filter is failing.
+            current_skip += len(raw_jobs)
             
             if self.dry_run:
                 print("\n" + "="*60)
