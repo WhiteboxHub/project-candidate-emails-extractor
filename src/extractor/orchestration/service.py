@@ -3,7 +3,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from ..connectors.http_api import get_api_client
 from ..connectors.imap_gmail import GmailIMAPConnector
@@ -22,6 +22,9 @@ from ..state.cache import DeduplicationCache
 from ..workflow.manager import WorkflowManager
 
 logger = logging.getLogger(__name__)
+
+# Project root = 3 levels above this file (src/extractor/orchestration/service.py)
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 class EmailExtractionService:
@@ -62,7 +65,7 @@ class EmailExtractionService:
         try:
             return config_loader.load()
         except FileNotFoundError:
-            fallback_path = Path(__file__).resolve().parents[3] / "configs" / "config.yaml"
+            fallback_path = _PROJECT_ROOT / "configs" / "config.yaml"
             config_loader.config_path = fallback_path
             logger.info("Primary config not found; using fallback config path: %s", fallback_path)
             return config_loader.load()
@@ -81,9 +84,13 @@ class EmailExtractionService:
         self.extractor = ContactExtractor(self.config)
         self.email_filter = EmailFilter(self.config)
 
-        tracker_file = self.runtime_parameters.get("uid_tracker_file", "last_run.json")
+        # ── UID tracker — always use an absolute path so it resolves correctly
+        # regardless of the working directory the script is launched from.
+        default_tracker = str(_PROJECT_ROOT / "last_run.json")
+        tracker_file = self.runtime_parameters.get("uid_tracker_file", default_tracker)
         self.uid_tracker = get_uid_tracker(tracker_file)
-        
+        self.logger.info("UID tracker file: %s", tracker_file)
+
         self.deduplication_cache = DeduplicationCache()
 
         self.candidate_runner = CandidateRunner(
@@ -98,7 +105,7 @@ class EmailExtractionService:
             reader_cls=EmailReader,
         )
 
-        # Initialize email reporter from environment variables
+        # Initialize SMTP email reporter from environment variables
         smtp_config = {
             "SMTP_SERVER": os.getenv("SMTP_SERVER"),
             "SMTP_PORT": os.getenv("SMTP_PORT", "587"),
@@ -129,7 +136,7 @@ class EmailExtractionService:
         total_emails_fetched = 0
 
         try:
-            # Initialize global deduplication cache from DB if available
+            # ── Global dedup cache warm-up ─────────────────────────────────────
             if self.vendor_util and self.deduplication_cache:
                 self.logger.info("Initializing global deduplication cache...")
                 recent_emails = self.vendor_util.get_recent_vendor_emails(limit=5000)
@@ -139,15 +146,10 @@ class EmailExtractionService:
                 candidate_id=candidate_id,
                 candidate_email=candidate_email,
             )
+
             if not candidates:
                 self.logger.warning("No candidates found with email credentials")
-                summary = self._finalize_summary(
-                    execution_metadata,
-                    total_contacts,
-                    total_positions,
-                    total_failed,
-                    total_emails_fetched,
-                )
+                summary = self._finalize_summary(execution_metadata, 0, 0, 0, 0)
                 self._update_run_status(
                     status="success",
                     records_processed=0,
@@ -156,21 +158,67 @@ class EmailExtractionService:
                     execution_metadata=summary,
                 )
                 self._persist_execution_log(summary)
-                # Generate and save JSON report
                 report = self._generate_json_report(summary)
                 self._save_json_report(report)
                 return summary
 
+            # ── Phase 1: Extract from ALL candidates ───────────────────────────
+            # Nothing is saved to DB here. Each runner returns its contacts.
+            all_extracted_contacts: List[Dict] = []
+            candidate_results = []
+
             for candidate in candidates:
                 result = self.candidate_runner.run(candidate)
+                candidate_results.append(result)
                 execution_metadata["candidates"].append(result.to_metadata())
-                total_contacts += result.contacts_saved
-                total_positions += result.positions_saved
                 total_emails_fetched += result.emails_fetched
 
                 if result.status != "success":
                     total_failed += 1
+                    self.logger.error(
+                        "Candidate %s (%s) FAILED: %s",
+                        result.candidate_id,
+                        result.email,
+                        result.error,
+                    )
+                else:
+                    all_extracted_contacts.extend(result.extracted_contacts)
 
+            # ── Phase 2: Single bulk save for ALL candidates ───────────────────
+            self.logger.info("=" * 70)
+            self.logger.info("BULK SAVE: %d contacts from all candidates", len(all_extracted_contacts))
+            self.logger.info("=" * 70)
+
+            save_result = {"contacts_inserted": 0, "contacts_skipped": 0,
+                           "positions_inserted": 0, "positions_skipped": 0}
+
+            if all_extracted_contacts and self.vendor_util:
+                try:
+                    save_result = self.vendor_util.save_contacts(all_extracted_contacts)
+                    total_contacts = save_result.get("contacts_inserted", 0)
+                    total_positions = save_result.get("positions_inserted", 0)
+                    self.logger.info(
+                        "Bulk save complete: %d contacts inserted, %d positions inserted, "
+                        "%d skipped",
+                        total_contacts,
+                        total_positions,
+                        save_result.get("contacts_skipped", 0),
+                    )
+                except Exception as save_error:
+                    self.logger.error("Bulk save failed: %s", save_error, exc_info=True)
+            elif not self.vendor_util:
+                self.logger.warning("vendor_util not available — skipping DB/API save")
+            else:
+                self.logger.info("No contacts extracted — nothing to save")
+
+            # Update candidate-level contacts_saved / positions_saved in metadata
+            # (We distribute the totals to the summary; per-candidate is already 0)
+            for meta in execution_metadata["candidates"]:
+                meta["bulk_contacts_inserted"] = total_contacts
+                meta["bulk_positions_inserted"] = total_positions
+
+            # ── Phase 3: Log activity per candidate ──────────────────────────
+            for result in candidate_results:
                 self._log_activity(
                     candidate_id=result.candidate_id,
                     email=result.email,
@@ -187,13 +235,16 @@ class EmailExtractionService:
             if total_failed == len(candidates):
                 overall_status = "failed"
 
-            # Collect errors for status update
             error_summary = None
             error_details = None
             if total_failed > 0:
-                failed_results = [c for c in execution_metadata["candidates"] if c.get("status") != "success"]
+                failed_results = [
+                    c for c in execution_metadata["candidates"] if c.get("status") != "success"
+                ]
                 error_summary = f"{total_failed} candidates failed"
-                error_details = "\n".join([f"{c.get('candidate_email')}: {c.get('error')}" for c in failed_results])
+                error_details = "\n".join(
+                    [f"{c.get('candidate_email')}: {c.get('error')}" for c in failed_results]
+                )
 
             summary = self._finalize_summary(
                 execution_metadata,
@@ -211,12 +262,14 @@ class EmailExtractionService:
                 execution_metadata=summary,
             )
             self._persist_execution_log(summary)
-            # Generate and save JSON report
+
+            # ── Report: JSON save + SMTP email ────────────────────────────────
             report = self._generate_json_report(summary)
             self._save_json_report(report)
-            # Send email report
             self.email_reporter.send_report(report)
+
             return summary
+
         except Exception as error:
             self.logger.error("Service execution failed: %s", error, exc_info=True)
             execution_metadata["fatal_error"] = str(error)
@@ -236,10 +289,8 @@ class EmailExtractionService:
                 execution_metadata=summary,
             )
             self._persist_execution_log(summary)
-            # Generate and save JSON report even on failure
             report = self._generate_json_report(summary)
             self._save_json_report(report)
-            # Send email report even on failure
             self.email_reporter.send_report(report)
             raise
 
@@ -273,8 +324,12 @@ class EmailExtractionService:
         total_emails_fetched: int,
     ) -> Dict:
         candidates = execution_metadata.get("candidates", [])
-        success_candidates = [item.get("candidate_email") for item in candidates if item.get("status") == "success"]
-        failed_candidates = [item.get("candidate_email") for item in candidates if item.get("status") != "success"]
+        success_candidates = [
+            item.get("candidate_email") for item in candidates if item.get("status") == "success"
+        ]
+        failed_candidates = [
+            item.get("candidate_email") for item in candidates if item.get("status") != "success"
+        ]
         execution_metadata["summary"] = {
             "total_candidates": len(candidates),
             "success_count": len(success_candidates),
@@ -292,7 +347,7 @@ class EmailExtractionService:
     def _persist_execution_log(self, execution_metadata: Dict):
         try:
             date_str = datetime.now().strftime("%Y-%m-%d")
-            output_dir = Path("output") / date_str
+            output_dir = _PROJECT_ROOT / "output" / date_str
             output_dir.mkdir(parents=True, exist_ok=True)
             run_label = self.run_id or "manual"
             output_file = output_dir / f"run_{run_label}.json"
@@ -305,18 +360,15 @@ class EmailExtractionService:
     def _generate_json_report(self, execution_metadata: Dict) -> Dict:
         """Generate a comprehensive JSON report for the extraction run."""
         candidates_data = execution_metadata.get("candidates", [])
-        
-        # Calculate aggregated metrics
+
         total_emails_fetched = sum(c.get("emails_fetched", 0) for c in candidates_data)
         total_duplicates = sum(c.get("duplicates_skipped", 0) for c in candidates_data)
         total_non_vendor = sum(c.get("non_vendor_filtered", 0) for c in candidates_data)
         total_inserted = sum(c.get("emails_inserted", 0) for c in candidates_data)
-        
-        # Separate successful and failed candidates
+
         successful = [c for c in candidates_data if c.get("status") == "success"]
         failed = [c for c in candidates_data if c.get("status") != "success"]
-        
-        # Calculate duration
+
         started = execution_metadata.get("started_at")
         finished = execution_metadata.get("finished_at")
         duration_seconds = None
@@ -327,8 +379,8 @@ class EmailExtractionService:
                 duration_seconds = (finish_dt - start_dt).total_seconds()
             except Exception:
                 pass
-        
-        report = {
+
+        return {
             "run_metadata": {
                 "run_id": self.run_id,
                 "workflow_id": self.workflow_id,
@@ -359,36 +411,28 @@ class EmailExtractionService:
                 for c in failed
             ],
         }
-        
-        return report
 
     def _save_json_report(self, report: Dict):
         """Save the JSON report to the output/reports directory."""
         try:
-            # Create reports directory
-            reports_dir = Path("output") / "reports"
+            reports_dir = _PROJECT_ROOT / "output" / "reports"
             reports_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Generate timestamped filename
+
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             report_file = reports_dir / f"extraction_report_{timestamp}.json"
             latest_report = reports_dir / "latest_extraction_report.json"
-            
-            # Save timestamped report
+
             with open(report_file, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2, default=str)
-            
-            # Save as latest report (overwrite)
             with open(latest_report, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2, default=str)
-            
+
             self.logger.info("=" * 80)
             self.logger.info("📊 EXTRACTION REPORT SAVED")
             self.logger.info("=" * 80)
-            self.logger.info(f"📁 Timestamped Report: {report_file.absolute()}")
-            self.logger.info(f"📄 Latest Report:      {latest_report.absolute()}")
+            self.logger.info("📁 Timestamped: %s", report_file)
+            self.logger.info("📄 Latest:      %s", latest_report)
             self.logger.info("=" * 80)
-            
         except Exception as error:
             self.logger.error("Failed to save JSON report: %s", error)
 

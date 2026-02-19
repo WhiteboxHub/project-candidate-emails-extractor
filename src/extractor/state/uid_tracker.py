@@ -170,12 +170,15 @@ class UIDTracker:
         logger.warning("Reset all UID tracking - will process all emails on next run")
 
 
-# Singleton instance
-_tracker_instance = None
+# Singleton instances keyed by resolved file path so that different paths
+# (e.g., absolute vs. relative) each get their own tracker instance.
+_tracker_instances: dict = {}
 
-def get_uid_tracker(tracker_file: str = 'last_run.json') -> UIDTracker:
-    """Get global UID tracker instance"""
-    global _tracker_instance
-    if _tracker_instance is None:
-        _tracker_instance = UIDTracker(tracker_file)
-    return _tracker_instance
+def get_uid_tracker(tracker_file: str = "last_run.json") -> UIDTracker:
+    """Return a UIDTracker for the given file path, reusing an existing instance if possible."""
+    global _tracker_instances
+    resolved = str(Path(tracker_file).resolve())
+    if resolved not in _tracker_instances:
+        _tracker_instances[resolved] = UIDTracker(tracker_file)
+    return _tracker_instances[resolved]
+
