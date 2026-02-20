@@ -39,6 +39,7 @@ class CandidateRunResult:
             "positions_saved": self.positions_saved,
             "filter_stats": self.filter_stats,
             "error": self.error,
+            "extracted_contacts": self.extracted_contacts,
         }
 
 
@@ -94,7 +95,7 @@ class CandidateRunner:
                 candidate_name=candidate_name,
                 email=email,
                 status="failed",
-                error="Missing candidate IMAP password",
+                error="No Imap password",
             )
 
         filter_stats = {
@@ -106,15 +107,17 @@ class CandidateRunner:
         }
 
         connector = self.connector_cls(email=email, password=password)
-        if not connector.connect():
+        connected, connect_err = connector.connect()
+        if not connected:
             return CandidateRunResult(
                 candidate_id=candidate_id,
                 candidate_name=candidate_name,
                 email=email,
                 status="failed",
-                error="Authentication failed - unable to connect to IMAP server",
+                error=connect_err or "Authentication failed - unable to connect to IMAP server",
                 filter_stats=filter_stats,
             )
+
 
         # Smart Deduplication: Pre-fetch existing contacts from DB so we don't
         # extract contacts we've already stored.
@@ -234,6 +237,7 @@ class CandidateRunner:
             self.logger.info(f"  - Existing Contacts:    {len(seen_emails)} (Cached from DB)")
             self.logger.info(f"  - New Deduplicates:     {deduplicated_count} (Skipped locally)")
             self.logger.info(f"  - Unique to Save:       {len(extracted_contacts)}")
+            # self.logger.info(f"  - Positions Saved:      {self.positions_saved}") # Silenced
             self.logger.info("=" * 60)
 
             non_vendor_count = filter_stats.get("junk", 0) + filter_stats.get("not_recruiter", 0)
@@ -243,8 +247,8 @@ class CandidateRunner:
                 candidate_name=candidate_name,
                 email=email,
                 status="success",
-                contacts_saved=0,       # set by service after bulk save
-                positions_saved=0,      # set by service after bulk save
+                contacts_saved=len(extracted_contacts),
+                positions_saved=len(extracted_contacts),
                 contacts_deduplicated=deduplicated_count,
                 emails_fetched=emails_fetched,
                 last_uid=last_processed_uid,

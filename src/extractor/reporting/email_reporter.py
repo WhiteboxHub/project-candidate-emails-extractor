@@ -99,12 +99,30 @@ class EmailReporter:
         total = summary.get("total_candidates", 0)
         success = summary.get("successful_candidates", 0)
         failed = summary.get("failed_candidates", 0)
-        inserted = summary.get("total_emails_inserted", 0)
+        contacts_inserted = summary.get("vendor_contacts_inserted", 0)
+        positions_inserted = summary.get("positions_inserted", 0)
+        total_found = summary.get("total_found_valid", 0)
+        total_passed_filters = summary.get("total_passed_filters", 0)
         fetched = summary.get("total_emails_fetched", 0)
         duplicates = summary.get("total_duplicates", 0)
         non_vendor = summary.get("total_non_vendor", 0)
 
         success_rate = f"{round(success / total * 100)}%" if total else "0%"
+
+        # ── Extracted contacts rows ───────────────────────────────────────────
+        all_found = run_metadata.get("all_found_contacts", [])
+        extracted_rows_html = ""
+        if all_found:
+            for c in all_found[:50]:  # Limit to 50 for the email report
+                name = c.get("name") or "—"
+                c_email = c.get("email") or "—"
+                company_name = c.get("company") or "—"
+                extracted_rows_html += f"""
+                <tr>
+                    <td style="padding:10px 12px; border-bottom:1px solid #f3f4f6;">{name}</td>
+                    <td style="padding:10px 12px; border-bottom:1px solid #f3f4f6; color:#6b7280;">{c_email}</td>
+                    <td style="padding:10px 12px; border-bottom:1px solid #f3f4f6; color:#6b7280;">{company_name}</td>
+                </tr>"""
 
         # ── Failed candidates rows ─────────────────────────────────────────────
         failed_rows_html = ""
@@ -126,6 +144,27 @@ class EmailReporter:
                         No failed candidates 🎉
                     </td>
                 </tr>"""
+
+        # ── Pre-compute extracted contacts section ─────────────────────────────
+        extracted_section = ""
+        if extracted_rows_html:
+            more_info = "(Showing up to 50 contacts. Full list available in JSON report.)" if len(all_found) > 50 else ""
+            extracted_section = f"""
+            <h2 style="font-size:16px; font-weight:600; color:#111827; margin:28px 0 12px;">Recently Discovered Contacts</h2>
+            <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; border:1px solid #e5e7eb; border-radius:8px; overflow:hidden;">
+                <thead>
+                    <tr style="background:#f9fafb;">
+                        <th style="padding:10px 12px; text-align:left; font-size:12px; color:#6b7280; text-transform:uppercase; letter-spacing:0.05em; border-bottom:1px solid #e5e7eb;">Name</th>
+                        <th style="padding:10px 12px; text-align:left; font-size:12px; color:#6b7280; text-transform:uppercase; letter-spacing:0.05em; border-bottom:1px solid #e5e7eb;">Email</th>
+                        <th style="padding:10px 12px; text-align:left; font-size:12px; color:#6b7280; text-transform:uppercase; letter-spacing:0.05em; border-bottom:1px solid #e5e7eb;">Company</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {extracted_rows_html}
+                </tbody>
+            </table>
+            <p style="margin:12px 0 0; font-size:12px; color:#6b7280;">{more_info}</p>
+            """
 
         failed_section = f"""
         <h2 style="font-size:16px; font-weight:600; color:#dc2626; margin:32px 0 12px;">
@@ -180,28 +219,34 @@ class EmailReporter:
             <!-- Summary stats cards -->
             <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:28px;">
                 <tr>
-                    <td width="25%" style="padding:0 6px 0 0;">
+                    <td width="16.6%" style="padding:0 4px 0 0;">
                         <div style="background:#eff6ff; border-radius:8px; padding:16px; text-align:center;">
-                            <p style="margin:0 0 4px; font-size:28px; font-weight:700; color:#1d4ed8;">{total}</p>
-                            <p style="margin:0; font-size:11px; color:#3b82f6; text-transform:uppercase; letter-spacing:0.05em;">Total Candidates</p>
+                            <p style="margin:0 0 4px; font-size:22px; font-weight:700; color:#1d4ed8;">{total}</p>
+                            <p style="margin:0; font-size:9px; color:#3b82f6; text-transform:uppercase; letter-spacing:0.05em;">Candidates</p>
                         </div>
                     </td>
-                    <td width="25%" style="padding:0 6px;">
+                    <td width="16.6%" style="padding:0 4px;">
                         <div style="background:#f0fdf4; border-radius:8px; padding:16px; text-align:center;">
-                            <p style="margin:0 0 4px; font-size:28px; font-weight:700; color:#15803d;">{success}</p>
-                            <p style="margin:0; font-size:11px; color:#16a34a; text-transform:uppercase; letter-spacing:0.05em;">Successful</p>
+                            <p style="margin:0 0 4px; font-size:22px; font-weight:700; color:#15803d;">{success}</p>
+                            <p style="margin:0; font-size:9px; color:#16a34a; text-transform:uppercase; letter-spacing:0.05em;">Success</p>
                         </div>
                     </td>
-                    <td width="25%" style="padding:0 6px;">
+                    <td width="16.6%" style="padding:0 4px;">
                         <div style="background:#fff5f5; border-radius:8px; padding:16px; text-align:center;">
-                            <p style="margin:0 0 4px; font-size:28px; font-weight:700; color:#dc2626;">{failed}</p>
-                            <p style="margin:0; font-size:11px; color:#ef4444; text-transform:uppercase; letter-spacing:0.05em;">Failed</p>
+                            <p style="margin:0 0 4px; font-size:22px; font-weight:700; color:#dc2626;">{failed}</p>
+                            <p style="margin:0; font-size:9px; color:#ef4444; text-transform:uppercase; letter-spacing:0.05em;">Failed</p>
                         </div>
                     </td>
-                    <td width="25%" style="padding:0 0 0 6px;">
+                    <td width="16.6%" style="padding:0 4px;">
+                        <div style="background:#f0fdfa; border-radius:8px; padding:16px; text-align:center;">
+                            <p style="margin:0 0 4px; font-size:22px; font-weight:700; color:#0d9488;">{total_passed_filters}</p>
+                            <p style="margin:0; font-size:9px; color:#14b8a6; text-transform:uppercase; letter-spacing:0.05em;">Extracted</p>
+                        </div>
+                    </td>
+                    <td width="16.6%" style="padding:0 4px;">
                         <div style="background:#fefce8; border-radius:8px; padding:16px; text-align:center;">
-                            <p style="margin:0 0 4px; font-size:28px; font-weight:700; color:#ca8a04;">{inserted}</p>
-                            <p style="margin:0; font-size:11px; color:#eab308; text-transform:uppercase; letter-spacing:0.05em;">Emails Inserted</p>
+                            <p style="margin:0 0 4px; font-size:22px; font-weight:700; color:#ca8a04;">{contacts_inserted}</p>
+                            <p style="margin:0; font-size:9px; color:#eab308; text-transform:uppercase; letter-spacing:0.05em;">Inserted (New)</p>
                         </div>
                     </td>
                 </tr>
@@ -230,6 +275,14 @@ class EmailReporter:
                         <td style="padding:12px 16px; border-bottom:1px solid #f3f4f6; font-size:14px; font-weight:600; color:#dc2626; text-align:right;">{failed}</td>
                     </tr>
                     <tr style="background:#f9fafb;">
+                        <td style="padding:12px 16px; border-bottom:1px solid #f3f4f6; font-size:14px; color:#374151;">Contacts Extracted (Passed Filters)</td>
+                        <td style="padding:12px 16px; border-bottom:1px solid #f3f4f6; font-size:14px; font-weight:600; color:#0d9488; text-align:right;">{total_passed_filters}</td>
+                    </tr>
+                    <tr style="background:#f9fafb;">
+                        <td style="padding:12px 16px; border-bottom:1px solid #f3f4f6; font-size:14px; color:#374151;">Contacts Inserted (New to DB)</td>
+                        <td style="padding:12px 16px; border-bottom:1px solid #f3f4f6; font-size:14px; font-weight:600; color:#ca8a04; text-align:right;">{contacts_inserted}</td>
+                    </tr>
+                    <tr style="background:#f9fafb;">
                         <td style="padding:12px 16px; border-bottom:1px solid #f3f4f6; font-size:14px; color:#374151;">Success Rate</td>
                         <td style="padding:12px 16px; border-bottom:1px solid #f3f4f6; font-size:14px; font-weight:600; color:#2563eb; text-align:right;">{success_rate}</td>
                     </tr>
@@ -238,14 +291,10 @@ class EmailReporter:
                         <td style="padding:12px 16px; border-bottom:1px solid #f3f4f6; font-size:14px; font-weight:600; color:#111827; text-align:right;">{fetched:,}</td>
                     </tr>
                     <tr style="background:#f9fafb;">
-                        <td style="padding:12px 16px; border-bottom:1px solid #f3f4f6; font-size:14px; color:#374151;">Total Emails Inserted</td>
-                        <td style="padding:12px 16px; border-bottom:1px solid #f3f4f6; font-size:14px; font-weight:600; color:#ca8a04; text-align:right;">{inserted:,}</td>
-                    </tr>
-                    <tr>
                         <td style="padding:12px 16px; border-bottom:1px solid #f3f4f6; font-size:14px; color:#374151;">Duplicates Skipped</td>
                         <td style="padding:12px 16px; border-bottom:1px solid #f3f4f6; font-size:14px; font-weight:600; color:#6b7280; text-align:right;">{duplicates:,}</td>
                     </tr>
-                    <tr style="background:#f9fafb;">
+                    <tr>
                         <td style="padding:12px 16px; font-size:14px; color:#374151;">Non-Vendor Filtered</td>
                         <td style="padding:12px 16px; font-size:14px; font-weight:600; color:#6b7280; text-align:right;">{non_vendor:,}</td>
                     </tr>
@@ -254,6 +303,9 @@ class EmailReporter:
 
             <!-- Failed candidates section -->
             {failed_section}
+
+            <!-- Extracted Contacts section -->
+            {extracted_section}
 
         </td>
     </tr>

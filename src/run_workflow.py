@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.extractor.workflow.manager import WorkflowManager
 from src.extractor.persistence.db_candidate_source import DatabaseCandidateSource
 from src.extractor.orchestration.service import EmailExtractionService
+from src.extractor.connectors.http_api import get_api_client
 
 # Configure logging to stdout/file
 logging.basicConfig(
@@ -115,8 +116,9 @@ def main():
     logger.info(f"Starting workflow run for key: {workflow_key}")
     
     try:
-        # 1. Initialize Manager and Load Config
-        manager = WorkflowManager()
+        # 1. Initialize API Client, Manager and Load Config
+        api_client = get_api_client()
+        manager = WorkflowManager(api_client)
         config = manager.get_workflow_config(workflow_key)
         
         if not config:

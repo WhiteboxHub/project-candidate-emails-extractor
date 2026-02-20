@@ -6,7 +6,7 @@ Persist extracted vendor/recruiter contacts plus raw job positions.
 Design:
 - save_contacts() is called ONCE by service.py after all candidates run.
 - All three tables are populated in bulk:
-  1. automation_contact_extracts  (audit / dedup table) — INSERT IGNORE
+  1. automation_contact_extracts  (audit / dedup table) — via API (INSERT IGNORE)
   2. vendor_contact via /api/vendor_contact/bulk
   3. raw_positions  via /api/raw-positions/bulk
 """
@@ -17,7 +17,6 @@ import json
 
 from ..connectors.http_api import APIClient
 from ..filtering.repository import get_filter_repository
-from ..core.database import get_db_client
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -30,56 +29,66 @@ class VendorUtil:
         self.api_client = api_client
         self.logger = logging.getLogger(__name__)
         self.filter_repo = get_filter_repository()
-        self.db_client = get_db_client()
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Deduplication helpers
+    # Deduplication helpers — now use API calls instead of raw SQL
     # ─────────────────────────────────────────────────────────────────────────
 
     def get_existing_emails(self, source_email: str) -> set:
         """
-        Fetch existing vendor emails for this candidate from DB to avoid re-inserting.
+        Fetch existing vendor emails for this candidate to avoid re-inserting.
+        Calls GET /api/automation-extracts?source_email=<email>
         """
         if not source_email:
             return set()
         try:
-            query = "SELECT email FROM vendor_contact_extracts WHERE source_email = %s"
-            results = self.db_client.execute_query(query, (source_email,))
-            existing = {row["email"].strip().lower() for row in results if row.get("email")}
-            self.logger.info(f"Loaded {len(existing)} existing contacts for deduplication")
+            response = self.api_client.get(
+                f"/api/automation-extracts?source_email={source_email}"
+            )
+            records = response if isinstance(response, list) else (response or {}).get("data", [])
+            existing = {r["email"].strip().lower() for r in records if r.get("email")}
+            self.logger.info("Loaded %d existing contacts for deduplication", len(existing))
             return existing
         except Exception as e:
-            self.logger.error(f"Failed to fetch existing contacts: {e}")
+            self.logger.error("Failed to fetch existing contacts: %s", e)
             return set()
 
     def get_recent_vendor_emails(self, limit: int = 5000) -> set:
-        """Fetch recently extracted unique vendor emails for global deduplication cache."""
+        """
+        Fetch recently extracted unique vendor emails for global deduplication cache.
+        Falls back to get_globally_existing_emails() with an empty list — the caller
+        should use get_globally_existing_emails() directly for a targeted check.
+        """
         try:
-            query = (
-                "SELECT email FROM vendor_contact_extracts "
-                "GROUP BY email ORDER BY MAX(id) DESC LIMIT %s"
+            # Note: The backend endpoint might not support limit/order_by yet, 
+            # but we use the general automation-extracts endpoint.
+            response = self.api_client.get(
+                f"/api/automation-extracts"
             )
-            results = self.db_client.execute_query(query, (limit,))
-            existing = {row["email"].strip().lower() for row in results if row.get("email")}
-            self.logger.info(f"Loaded {len(existing)} global vendor emails for cache")
+            records = response if isinstance(response, list) else (response or {}).get("data", [])
+            existing = {r["email"].strip().lower() for r in records if r.get("email")}
+            self.logger.info("Loaded %d global vendor emails for cache", len(existing))
             return existing
         except Exception as e:
-            self.logger.error(f"Failed to fetch global vendor cache: {e}")
+            self.logger.error("Failed to fetch global vendor cache: %s", e)
             return set()
 
     def get_globally_existing_emails(self, emails: List[str]) -> set:
         """
-        Check which emails from the provided list already exist in the database globally.
+        Check which emails from the provided list already exist globally.
+        Calls POST /api/automation-extracts/check-emails — one bulk API call.
         """
         if not emails:
             return set()
         try:
-            placeholders = ", ".join(["%s"] * len(emails))
-            query = f"SELECT email FROM vendor_contact_extracts WHERE email IN ({placeholders})"
-            results = self.db_client.execute_query(query, tuple(emails))
-            return {row["email"].strip().lower() for row in results if row.get("email")}
+            response = self.api_client.post(
+                "/api/automation-extracts/check-emails",
+                {"emails": emails},
+            )
+            found = response.get("existing_emails", []) if isinstance(response, dict) else []
+            return {e.strip().lower() for e in found if e}
         except Exception as e:
-            self.logger.error(f"Failed to check global existing emails: {e}")
+            self.logger.error("Failed to check global existing emails: %s", e)
             return set()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -103,6 +112,8 @@ class VendorUtil:
             "contacts_skipped": 0,
             "positions_inserted": 0,
             "positions_skipped": 0,
+            "extracts_inserted": 0,
+            "extracts_skipped": 0,
         }
         if not contacts:
             self.logger.info("No contacts to save")
@@ -152,7 +163,9 @@ class VendorUtil:
         # ── Step 3: Bulk INSERT IGNORE → automation_contact_extracts ─────────
         # ALL filtered contacts are recorded (new ones as 'new', duplicates
         # are silently ignored by INSERT IGNORE via the unique index).
-        self._bulk_insert_contact_extracts(filtered_contacts, existing_global_emails)
+        ext_inserted, ext_skipped = self._bulk_insert_contact_extracts(filtered_contacts, existing_global_emails)
+        result["extracts_inserted"] = ext_inserted
+        result["extracts_skipped"] = ext_skipped
 
         if not truly_new_contacts:
             self.logger.info("No truly new contacts — all duplicates recorded in audit table.")
@@ -192,59 +205,64 @@ class VendorUtil:
         return result
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Bulk DB insert — automation_contact_extracts
+    # Bulk API insert — automation_contact_extracts
     # ─────────────────────────────────────────────────────────────────────────
 
     def _bulk_insert_contact_extracts(
         self,
         contacts: List[Dict],
         existing_global_emails: set,
-    ):
+    ) -> tuple[int, int]:
         """
-        INSERT IGNORE all contacts into automation_contact_extracts in one batch.
-        The table's UNIQUE KEY (uq_email_linkedin) handles true DB-level dedup;
-        INSERT IGNORE means duplicates are silently skipped without raising.
+        Bulk-insert all contacts into automation_contact_extracts via API.
+        The backend does INSERT IGNORE so duplicates are silently skipped.
+        Returns (inserted, skipped).
         """
         if not contacts:
-            return
-
-        query = """
-            INSERT IGNORE INTO automation_contact_extracts (
-                full_name, email, phone, company_name, job_title,
-                city, postal_code, linkedin_id, source_type,
-                source_reference, raw_payload, processing_status, classification
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
+            return 0, 0
 
         rows = []
         for contact in contacts:
             email_lc = (contact.get("email") or "").strip().lower()
             status = "duplicate" if email_lc in existing_global_emails else "new"
-            rows.append((
-                contact.get("name"),
-                contact.get("email"),
-                contact.get("phone"),
-                contact.get("company"),
-                contact.get("job_position"),
-                contact.get("location"),       # full location → city for now
-                contact.get("zip_code"),        # → postal_code
-                contact.get("linkedin_id"),
-                "email",                        # source_type
-                contact.get("source"),          # source_reference (candidate inbox)
-                json.dumps(contact, default=str),
-                status,
-                "unknown",                      # classification
-            ))
+            rows.append({
+                "full_name":       contact.get("name"),
+                "email":           contact.get("email"),
+                "phone":           contact.get("phone"),
+                "company_name":    contact.get("company"),
+                "job_title":       contact.get("job_position"),
+                "city":            contact.get("location"),
+                "postal_code":     contact.get("zip_code"),
+                "linkedin_id":     contact.get("linkedin_id"),
+                "source_type":     "email",
+                "source_reference": contact.get("source"),
+                "raw_payload":     contact,
+                "processing_status": status,
+                "classification":  "unknown",
+            })
 
         try:
-            affected = self.db_client.execute_many(query, rows)
-            self.logger.info(
-                "automation_contact_extracts: INSERT IGNORE %d rows → %d inserted (rest were duplicates)",
-                len(rows),
-                affected if affected >= 0 else "?",
+            response = self.api_client.post(
+                "/api/automation-extracts/bulk",
+                {"extracts": rows},
             )
+            if isinstance(response, dict):
+                inserted = response.get("inserted", 0)
+                duplicates = response.get("duplicates", 0)
+                failed = response.get("failed", 0)
+                self.logger.info(
+                    "automation-extracts bulk: %d rows → %d inserted, %d duplicates, %d failed",
+                    response.get("total", len(rows)),
+                    inserted,
+                    duplicates,
+                    failed,
+                )
+                return inserted, (duplicates + failed)
         except Exception as e:
-            self.logger.error("Bulk insert into automation_contact_extracts failed: %s", e)
+            self.logger.error("Error in audit bulk insert: %s", e)
+        
+        return 0, len(rows)  # Default on error
+
 
     # ─────────────────────────────────────────────────────────────────────────
     # Payload builders
@@ -295,7 +313,7 @@ class VendorUtil:
                 "candidate_id": cid,
                 "source": "email",
                 "source_uid": contact.get("extracted_from_uid"),
-                "extractor_version": "v2.0",
+                "extractor_version": "v1.0",
                 "raw_title": contact.get("job_position"),
                 "raw_company": contact.get("company"),
                 "raw_location": contact.get("location"),

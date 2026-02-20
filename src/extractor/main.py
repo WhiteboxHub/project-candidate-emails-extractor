@@ -3,6 +3,7 @@ from .core.logging import setup_logging
 from .orchestration.service import EmailExtractionService
 from .workflow.manager import WorkflowManager
 from .persistence.db_candidate_source import DatabaseCandidateSource
+from .connectors.http_api import get_api_client
 from .core.constants import DEFAULT_CONFIG_PATH, DEFAULT_LOGGING_CONFIG_PATH
 import logging
 import sys
@@ -14,8 +15,9 @@ def main():
     # config = load_config(DEFAULT_CONFIG_PATH) # Config is loaded by Service internal logic or passed via params
 
     try:
-        # 1. Initialize Workflow Manager
-        workflow_manager = WorkflowManager()
+        # 1. Initialize API Client and Workflow Manager
+        api_client = get_api_client()
+        workflow_manager = WorkflowManager(api_client)
         workflow_key = "email_extractor" # Default key, could be env var
 
         # 2. Fetch Workflow Configuration

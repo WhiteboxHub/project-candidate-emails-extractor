@@ -108,8 +108,10 @@ class JobActivityLogUtil:
                 "activity_count": contacts_extracted
             }
 
-            if notes:
-                log_data["notes"] = notes
+            # Use per-activity notes if present, otherwise fallback to global notes
+            item_notes = activity.get("notes") or notes
+            if item_notes:
+                log_data["notes"] = item_notes
 
             bulk_logs.append(log_data)
 

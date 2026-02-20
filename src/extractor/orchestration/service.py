@@ -86,9 +86,15 @@ class EmailExtractionService:
 
         # ── UID tracker — always use an absolute path so it resolves correctly
         # regardless of the working directory the script is launched from.
+        # Pass api_client + workflow_id so the tracker can recover UIDs from
+        # the latest automation_workflow_log if last_run.json is missing.
         default_tracker = str(_PROJECT_ROOT / "last_run.json")
         tracker_file = self.runtime_parameters.get("uid_tracker_file", default_tracker)
-        self.uid_tracker = get_uid_tracker(tracker_file)
+        self.uid_tracker = get_uid_tracker(
+            tracker_file,
+            api_client=self.api_client,
+            workflow_id=self.workflow_id,
+        )
         self.logger.info("UID tracker file: %s", tracker_file)
 
         self.deduplication_cache = DeduplicationCache()
@@ -132,8 +138,11 @@ class EmailExtractionService:
 
         total_contacts = 0
         total_positions = 0
+        total_extracts = 0
         total_failed = 0
         total_emails_fetched = 0
+        total_duplicates = 0
+        total_non_vendor = 0
 
         try:
             # ── Global dedup cache warm-up ─────────────────────────────────────
@@ -167,11 +176,28 @@ class EmailExtractionService:
             all_extracted_contacts: List[Dict] = []
             candidate_results = []
 
+            # Guard: skip any candidate whose email has already been processed
+            # in this run (handles duplicate DB rows for the same inbox).
+            seen_candidate_emails: set = set()
+
             for candidate in candidates:
+                cand_email = (candidate.get("email") or "").strip().lower()
+                if cand_email and cand_email in seen_candidate_emails:
+                    self.logger.warning(
+                        "Skipping duplicate candidate email in run: %s — already processed this inbox",
+                        cand_email,
+                    )
+                    total_failed += 1
+                    continue
+                if cand_email:
+                    seen_candidate_emails.add(cand_email)
+
                 result = self.candidate_runner.run(candidate)
                 candidate_results.append(result)
                 execution_metadata["candidates"].append(result.to_metadata())
                 total_emails_fetched += result.emails_fetched
+                total_duplicates += result.duplicates_skipped
+                total_non_vendor += result.non_vendor_filtered
 
                 if result.status != "success":
                     total_failed += 1
@@ -197,12 +223,12 @@ class EmailExtractionService:
                     save_result = self.vendor_util.save_contacts(all_extracted_contacts)
                     total_contacts = save_result.get("contacts_inserted", 0)
                     total_positions = save_result.get("positions_inserted", 0)
+                    total_extracts = save_result.get("extracts_inserted", 0)
                     self.logger.info(
-                        "Bulk save complete: %d contacts inserted, %d positions inserted, "
-                        "%d skipped",
+                        "Bulk save complete: %d contacts, %d audit extracts inserted", # (silenced %d positions)
                         total_contacts,
-                        total_positions,
-                        save_result.get("contacts_skipped", 0),
+                        # total_positions,
+                        total_extracts,
                     )
                 except Exception as save_error:
                     self.logger.error("Bulk save failed: %s", save_error, exc_info=True)
@@ -218,16 +244,24 @@ class EmailExtractionService:
                 meta["bulk_positions_inserted"] = total_positions
 
             # ── Phase 3: Log activity per candidate ──────────────────────────
-            for result in candidate_results:
-                self._log_activity(
-                    candidate_id=result.candidate_id,
-                    email=result.email,
-                    contacts_saved=result.contacts_saved,
-                    positions_saved=result.positions_saved,
-                    emails_fetched=result.emails_fetched,
-                    filter_stats=result.filter_stats,
-                    error_message=result.error,
-                )
+            if self.job_activity_log_util:
+                activity_logs = []
+                for result in candidate_results:
+                    log_item = self._prepare_activity_log_item(
+                        candidate_id=result.candidate_id,
+                        email=result.email,
+                        contacts_saved=result.contacts_saved,
+                        positions_saved=result.positions_saved,
+                        emails_fetched=result.emails_fetched,
+                        filter_stats=result.filter_stats,
+                        error_message=result.error,
+                    )
+                    if log_item:
+                        activity_logs.append(log_item)
+                
+                if activity_logs:
+                    self.logger.info("Sending %d job activity logs in bulk", len(activity_logs))
+                    self.job_activity_log_util.log_activities_bulk(activity_logs)
 
             overall_status = "success"
             if total_failed > 0:
@@ -246,12 +280,16 @@ class EmailExtractionService:
                     [f"{c.get('candidate_email')}: {c.get('error')}" for c in failed_results]
                 )
 
+            total_found = total_contacts + total_duplicates
+            
             summary = self._finalize_summary(
                 execution_metadata,
                 total_contacts,
                 total_positions,
+                total_extracts,
                 total_failed,
                 total_emails_fetched,
+                total_found=total_found,
             )
             self._update_run_status(
                 status=overall_status,
@@ -263,6 +301,21 @@ class EmailExtractionService:
             )
             self._persist_execution_log(summary)
 
+            # ── Final UID flush — authoritative post-run persistence ──────────
+            # mid-run update_last_uid() only fires when a batch advances the
+            # high-water mark. Here we do a final sweep so every successful
+            # candidate has its latest UID and last_run timestamp written to
+            # last_run.json, even if no new emails were found this cycle.
+            flushed = 0
+            for result in candidate_results:
+                if result.status == "success" and result.last_uid and result.email:
+                    self.uid_tracker.update_last_uid(result.email, result.last_uid, force_timestamp=True)
+                    flushed += 1
+            if flushed:
+                self.logger.info(
+                    "Final UID flush: persisted last_uid for %d candidates to last_run.json", flushed
+                )
+
             # ── Report: JSON save + SMTP email ────────────────────────────────
             report = self._generate_json_report(summary)
             self._save_json_report(report)
@@ -273,12 +326,15 @@ class EmailExtractionService:
         except Exception as error:
             self.logger.error("Service execution failed: %s", error, exc_info=True)
             execution_metadata["fatal_error"] = str(error)
+            total_found = total_contacts + total_duplicates
             summary = self._finalize_summary(
                 execution_metadata,
                 total_contacts,
                 total_positions,
-                total_failed,
-                total_emails_fetched,
+                total_extracts=0,
+                total_failed=total_failed,
+                total_emails_fetched=total_emails_fetched,
+                total_found=total_found,
             )
             self._update_run_status(
                 status="failed",
@@ -320,8 +376,10 @@ class EmailExtractionService:
         execution_metadata: Dict,
         total_contacts: int,
         total_positions: int,
+        total_extracts: int,
         total_failed: int,
         total_emails_fetched: int,
+        total_found: int = 0,
     ) -> Dict:
         candidates = execution_metadata.get("candidates", [])
         success_candidates = [
@@ -336,7 +394,9 @@ class EmailExtractionService:
             "failure_count": len(failed_candidates),
             "total_contacts_inserted": total_contacts,
             "total_positions_inserted": total_positions,
+            "total_extracts_inserted": total_extracts,
             "total_emails_fetched": total_emails_fetched,
+            "total_found_valid": total_found,
             "total_candidates_failed": total_failed,
             "successful_candidates": success_candidates,
             "failed_candidates": failed_candidates,
@@ -360,11 +420,22 @@ class EmailExtractionService:
     def _generate_json_report(self, execution_metadata: Dict) -> Dict:
         """Generate a comprehensive JSON report for the extraction run."""
         candidates_data = execution_metadata.get("candidates", [])
+        run_summary = execution_metadata.get("summary", {})
 
         total_emails_fetched = sum(c.get("emails_fetched", 0) for c in candidates_data)
         total_duplicates = sum(c.get("duplicates_skipped", 0) for c in candidates_data)
         total_non_vendor = sum(c.get("non_vendor_filtered", 0) for c in candidates_data)
-        total_inserted = sum(c.get("emails_inserted", 0) for c in candidates_data)
+
+        # Use the bulk-save totals accumulated by _finalize_summary (set after
+        # vendor_util.save_contacts runs) — NOT per-candidate emails_inserted
+        # which is always 0 because saving happens after all candidates finish.
+        total_contacts_inserted = run_summary.get("total_contacts_inserted", 0)
+        total_extracted = sum(c.get("contacts_saved", 0) for c in candidates_data)
+        total_passed_filters = sum(
+            (c.get("filter_stats") or {}).get("passed", 0) for c in candidates_data
+        )
+        total_positions_inserted = run_summary.get("total_positions_inserted", 0)
+        total_extracts_inserted = run_summary.get("total_extracts_inserted", 0)
 
         successful = [c for c in candidates_data if c.get("status") == "success"]
         failed = [c for c in candidates_data if c.get("status") != "success"]
@@ -394,10 +465,18 @@ class EmailExtractionService:
                 "successful_candidates": len(successful),
                 "failed_candidates": len(failed),
                 "total_emails_fetched": total_emails_fetched,
-                "total_emails_inserted": total_inserted,
+                "total_passed_filters": total_passed_filters,
+                "total_extracted": total_extracted,
+                "vendor_contacts_inserted": total_contacts_inserted,
                 "total_duplicates": total_duplicates,
                 "total_non_vendor": total_non_vendor,
+                "total_found_valid": run_summary.get("total_found_valid", total_contacts_inserted + total_duplicates),
+                "positions_inserted": total_positions_inserted,
             },
+            "all_found_contacts": [
+                contact for c in candidates_data 
+                for contact in c.get("extracted_contacts", [])
+            ][:500],  # Limit to 500 for safety
             "candidates": candidates_data,
             "successful_candidates": [c.get("candidate_email") for c in successful],
             "failed_candidates": [c.get("candidate_email") for c in failed],
@@ -436,7 +515,7 @@ class EmailExtractionService:
         except Exception as error:
             self.logger.error("Failed to save JSON report: %s", error)
 
-    def _log_activity(
+    def _prepare_activity_log_item(
         self,
         candidate_id: Optional[int],
         email: str,
@@ -445,12 +524,10 @@ class EmailExtractionService:
         emails_fetched: int,
         filter_stats: Dict,
         error_message: Optional[str],
-    ):
-        if not self.job_activity_log_util:
-            return
+    ) -> Optional[Dict]:
         if not candidate_id:
             self.logger.warning("Missing candidate_id for %s - skipping job activity log", email)
-            return
+            return None
 
         notes_parts = [
             f"contacts_inserted={contacts_saved}",
@@ -469,8 +546,8 @@ class EmailExtractionService:
             notes_parts.append(f"error={error_message}")
 
         notes = " | ".join(notes_parts)
-        self.job_activity_log_util.log_activity(
-            candidate_id=candidate_id,
-            contacts_extracted=contacts_saved,
-            notes=notes,
-        )
+        return {
+            "candidate_id": candidate_id,
+            "contacts_extracted": contacts_saved,
+            "notes": notes,
+        }
