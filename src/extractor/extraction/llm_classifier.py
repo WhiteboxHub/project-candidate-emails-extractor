@@ -16,23 +16,40 @@ class LLMJobClassifier:
     
     def __init__(
         self, 
-        base_url: str = "http://localhost:8000", 
+        base_url: Optional[str] = None, 
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
         threshold: float = 0.7
     ):
         self.logger = logging.getLogger(__name__)
         self.threshold = threshold
-        self.base_url = base_url.rstrip('/')
-        self.generate_endpoint = f"{self.base_url}/generate" # Removed trailing slash to avoid 307 redirect
+        self.api_key = api_key
+        
+        if self.api_key:
+            self.provider = "groq"
+            self.base_url = (base_url or "https://api.groq.com/openai/v1").rstrip('/')
+            self.model = model or "llama-3.1-8b-instant"
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            self.endpoint = "/chat/completions"
+        else:
+            self.provider = "local"
+            self.base_url = (base_url or "http://localhost:8000").rstrip('/')
+            self.model = model or "qwen2.5:1.5b"
+            headers = {"Content-Type": "application/json"}
+            self.endpoint = "/generate"
         
         # Specific Fix: Use a persistent httpx client for efficiency and reliability
         self.client = httpx.Client(
             base_url=self.base_url,
             timeout=httpx.Timeout(120.0, connect=10.0),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             follow_redirects=True
         )
         
-        self.logger.info(f"Local LLM initialized at: {self.generate_endpoint}")
+        self.logger.info(f"LLM initialized: provider={self.provider}, model={self.model}")
 
     def build_system_prompt(self) -> str:
         """
@@ -70,18 +87,27 @@ class LLMJobClassifier:
 
         for attempt in range(max_retries):
             try:
-                # Optimized Fix: Use 'prompt' directly as expected by the local server
-                # Combine system prompt and user text into one block
-                combined_prompt = f"{self.build_system_prompt()}\n\nClassify this job text:\n\n{text[:4000]}"
-                
-                payload = {
-                    "prompt": combined_prompt,
-                    "model": "qwen2.5:1.5b",
-                    "temperature": 0.0
-                }
+                if self.provider == "groq":
+                    payload = {
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": self.build_system_prompt()},
+                            {"role": "user", "content": f"Classify this job text:\n\n{text[:4000]}"}
+                        ],
+                        "temperature": 0.0,
+                        "response_format": {"type": "json_object"}
+                    }
+                else:
+                    # Optimized Fix: Use 'prompt' directly as expected by the local server
+                    combined_prompt = f"{self.build_system_prompt()}\n\nClassify this job text:\n\n{text[:4000]}"
+                    payload = {
+                        "prompt": combined_prompt,
+                        "model": self.model,
+                        "temperature": 0.0
+                    }
 
-                self.logger.info(f"  [LLM] Requesting classification (Attempt {attempt + 1})...")
-                response = self.client.post("/generate", json=payload)
+                self.logger.info(f"  [LLM] Requesting classification ({self.provider}, Attempt {attempt + 1})...")
+                response = self.client.post(self.endpoint, json=payload)
                 
                 # Handle rate limiting or server errors with backoff
                 if response.status_code in [429, 500, 502, 503, 504]:

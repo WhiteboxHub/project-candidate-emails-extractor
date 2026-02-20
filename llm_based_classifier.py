@@ -2,6 +2,7 @@
 import argparse
 import logging
 import sys
+import os
 import time
 from pathlib import Path
 from dotenv import load_dotenv
@@ -38,8 +39,17 @@ class LLMJobClassifyOrchestrator:
             self.api_client = get_api_client()
             self.persistence = JobPersistence(self.api_client)
             self.preprocessor = BERTPreprocessor()
-            self.classifier = LLMJobClassifier(threshold=threshold)
-            logger.info("Local LLM components initialized")
+            
+            # Load Groq config if available
+            groq_key = os.getenv("GROQ_API_KEY")
+            groq_model = os.getenv("GROQ_MODEL") or os.getenv("MODEL_NAME")
+            
+            self.classifier = LLMJobClassifier(
+                api_key=groq_key,
+                model=groq_model,
+                threshold=threshold
+            )
+            logger.info("LLM components initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize components: {e}")
             sys.exit(1)
