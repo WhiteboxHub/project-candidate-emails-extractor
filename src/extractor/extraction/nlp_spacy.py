@@ -61,6 +61,11 @@ class SpacyNERExtractor:
         self.client_keywords = self._load_client_keywords()
         self.generic_terms = self._load_generic_terms()
         self.vendor_indicators = self._load_vendor_indicators()
+        
+        # NEW: Location indicators and city lists
+        self.location_indicators = self._load_list_filter('ner_location_indicators')
+        self.common_cities = self._load_list_filter('ner_common_cities')
+        self.ner_company_suffixes = self._load_list_filter('ner_company_suffixes')
     
     def _load_job_title_keywords(self) -> set:
         """Load job title keywords from filter repository (CSV only - no fallback)"""
@@ -157,20 +162,29 @@ class SpacyNERExtractor:
             self.logger.error(f"Failed to load generic terms from CSV: {str(e)} - using empty list")
             return []
     
-    def _load_vendor_indicators(self) -> list:
-        """Load vendor indicator phrases from CSV (CSV only - no fallback)"""
+    def _load_vendor_indicators(self) -> set:
+        """Load vendor indicators from filter repository (CSV)"""
         try:
             keyword_lists = self.filter_repo.get_keyword_lists()
             if 'vendor_indicators' in keyword_lists:
-                indicators = keyword_lists['vendor_indicators']
-                self.logger.info(f"✓ Loaded {len(indicators)} vendor indicators from CSV")
-                return indicators
-            else:
-                self.logger.error("⚠ vendor_indicators not found in CSV - using empty list")
-                return []
+                return {kw.lower().strip() for kw in keyword_lists['vendor_indicators']}
+            return set()
         except Exception as e:
-            self.logger.error(f"Failed to load vendor indicators from CSV: {str(e)} - using empty list")
-            return []
+            self.logger.error(f"Error loading vendor indicators: {str(e)}")
+            return set()
+
+    def _load_list_filter(self, category: str) -> set:
+        """Generic method to load keyword list from filter repository"""
+        try:
+            keyword_lists = self.filter_repo.get_keyword_lists()
+            if category in keyword_lists:
+                self.logger.info(f"✓ Loaded {len(keyword_lists[category])} {category} from CSV")
+                return {kw.lower().strip() for kw in keyword_lists[category]}
+            self.logger.warning(f"⚠ {category} not found in CSV")
+            return set()
+        except Exception as e:
+            self.logger.error(f"Error loading {category}: {str(e)}")
+            return set()
     
     def extract_vendor_from_span(self, html_content: str) -> Dict[str, Optional[str]]:
         """Extract vendor name and company from HTML span tags (e.g. <span>Name - Company</span>) with relaxed matching"""
@@ -568,8 +582,7 @@ class SpacyNERExtractor:
             self.logger.debug(f"Penalty: Too short ({name})")
         
         # BONUS: Company has common business suffix (Inc, LLC, Corp, Ltd, etc.)
-        company_suffixes = ['inc', 'llc', 'corp', 'ltd', 'limited', 'corporation', 'incorporated', 'co', 'company', 'group', 'solutions', 'services', 'technologies', 'tech', 'systems']
-        if any(name.lower().endswith(suffix) or f' {suffix}' in name.lower() for suffix in company_suffixes):
+        if self.ner_company_suffixes and any(name.lower().endswith(suffix) or f' {suffix}' in name.lower() for suffix in self.ner_company_suffixes):
             score += 0.10
             self.logger.debug(f"Bonus: Company suffix detected ({name})")
         
@@ -689,36 +702,9 @@ class SpacyNERExtractor:
         text_lower = text.lower().strip()
         text_clean = re.sub(r'[^\w\s]', '', text_lower)  # Remove punctuation
         
-        # Common location indicators
-        location_indicators = [
-            # US States (abbreviations and full names)
-            'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado', 'connecticut',
-            'delaware', 'florida', 'georgia', 'hawaii', 'idaho', 'illinois', 'indiana', 'iowa',
-            'kansas', 'kentucky', 'louisiana', 'maine', 'maryland', 'massachusetts', 'michigan',
-            'minnesota', 'mississippi', 'missouri', 'montana', 'nebraska', 'nevada', 'new hampshire',
-            'new jersey', 'new mexico', 'new york', 'north carolina', 'north dakota', 'ohio',
-            'oklahoma', 'oregon', 'pennsylvania', 'rhode island', 'south carolina', 'south dakota',
-            'tennessee', 'texas', 'utah', 'vermont', 'virginia', 'washington', 'west virginia',
-            'wisconsin', 'wyoming',
-            # State abbreviations
-            'ca', 'ny', 'tx', 'fl', 'il', 'pa', 'oh', 'ga', 'nc', 'mi', 'nj', 'va', 'wa', 'az',
-            'ma', 'tn', 'in', 'mo', 'md', 'wi', 'co', 'mn', 'sc', 'al', 'la', 'ky', 'or', 'ok',
-            'ct', 'ia', 'ut', 'ar', 'nv', 'ms', 'ks', 'nm', 'ne', 'wv', 'id', 'hi', 'nh', 'me',
-            'ri', 'mt', 'de', 'sd', 'nd', 'ak', 'dc', 'vt', 'wy',
-            # Common location suffixes
-            'city', 'town', 'county', 'state', 'province', 'region', 'area', 'district',
-            # Common location patterns
-            'united states', 'usa', 'us', 'uk', 'united kingdom', 'canada', 'australia',
-            # Directional indicators (often part of location names)
-            'north', 'south', 'east', 'west', 'northern', 'southern', 'eastern', 'western',
-            'upper', 'lower', 'central', 'metro', 'greater'
-        ]
-        
         # Check if text contains location indicators (WITH WORD BOUNDARIES)
-        # CRITICAL FIX: Use exact word matching for short indicators (like state codes 'ca', 'al')
-        # otherwise 'Sibitalent' matches 'al' and gets rejected.
         text_words = set(text_clean.split())
-        for indicator in location_indicators:
+        for indicator in self.location_indicators:
             # For short indicators (len <= 3), require exact match
             if len(indicator) <= 3:
                 if indicator in text_words:
@@ -730,27 +716,10 @@ class SpacyNERExtractor:
                     self.logger.debug(f"Rejected location as company: {text} (contains '{indicator}')")
                     return True
         
-        # Check if it's a common city name pattern (single word, capitalized, common city names)
-        common_cities = [
-            'new york', 'los angeles', 'chicago', 'houston', 'phoenix', 'philadelphia',
-            'san antonio', 'san diego', 'dallas', 'san jose', 'austin', 'jacksonville',
-            'san francisco', 'indianapolis', 'columbus', 'fort worth', 'charlotte',
-            'seattle', 'denver', 'washington', 'boston', 'el paso', 'detroit', 'nashville',
-            'portland', 'oklahoma city', 'las vegas', 'memphis', 'louisville', 'baltimore',
-            'milwaukee', 'albuquerque', 'tucson', 'fresno', 'sacramento', 'kansas city',
-            'mesa', 'atlanta', 'omaha', 'colorado springs', 'raleigh', 'virginia beach',
-            'miami', 'oakland', 'minneapolis', 'tulsa', 'cleveland', 'wichita', 'arlington',
-            'tampa', 'new orleans', 'honolulu', 'london', 'paris', 'tokyo', 'sydney',
-            'toronto', 'vancouver', 'montreal', 'mumbai', 'delhi', 'bangalore', 'singapore'
-        ]
-        
-        if text_clean in common_cities:
+        # Check if it's a common city name pattern
+        if text_clean in self.common_cities:
             self.logger.debug(f"Rejected known city as company: {text}")
             return True
-        
-        # Pattern: If text is just 1-2 words and looks like a location (all caps or title case, no numbers)
-        # REMOVED AGGRESSIVE CHECK: This was rejecting valid single-word companies (e.g. "Google", "Stripe")
-        # that don't have suffixes. We should rely on the explicit location lists above instead.
         
         return False
         

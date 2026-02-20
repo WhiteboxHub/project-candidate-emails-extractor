@@ -25,26 +25,47 @@ class GmailIMAPConnector:
         self.connection = None
         self.logger = logging.getLogger(__name__)
     
-    def connect(self) -> bool:
+    def connect(self) -> tuple:
         """
-        Establish IMAP connection
-        
+        Establish IMAP connection.
+
         Returns:
-            True if connected, False otherwise
+            (True, None) on success.
+            (False, error_message) on failure, where error_message is
+            human-readable and distinguishes between auth failures and
+            network/connection errors.
         """
         try:
             self.logger.info(f"Connecting to {self.IMAP_SERVER}:{self.IMAP_PORT}...")
             self.connection = imaplib.IMAP4_SSL(self.IMAP_SERVER, self.IMAP_PORT)
             self.connection.login(self.email, self.password)
             self.logger.info(f"Successfully connected to {self.email}")
-            return True
-            
+            return True, None
+
         except imaplib.IMAP4.error as e:
-            self.logger.error(f"IMAP authentication failed for {self.email}: {str(e)}")
-            return False
+            raw = str(e).lower()
+            if "authentication failed" in raw or "invalid credentials" in raw or "authenticationfailed" in raw:
+                msg = (
+                    "Invalid IMAP app password (authentication failed). "
+                    "Ensure Gmail 2-Step Verification is ON and an App Password "
+                    "is generated for this account."
+                )
+            elif "too many simultaneous connections" in raw:
+                msg = "Too many simultaneous IMAP connections — try again shortly."
+            else:
+                msg = f"IMAP login error: {str(e)}"
+            self.logger.error(f"IMAP login failed for {self.email}: {msg}")
+            return False, msg
+
+        except OSError as e:
+            msg = f"Cannot reach IMAP server ({self.IMAP_SERVER}:{self.IMAP_PORT}): {str(e)}"
+            self.logger.error(f"IMAP connection refused for {self.email}: {str(e)}")
+            return False, msg
+
         except Exception as e:
+            msg = f"Unexpected IMAP error: {str(e)}"
             self.logger.error(f"Failed to connect to IMAP for {self.email}: {str(e)}")
-            return False
+            return False, msg
     
     def is_connected(self) -> bool:
         """
