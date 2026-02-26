@@ -207,9 +207,9 @@ class LLMJobClassifyOrchestrator:
                                 logger.error(f"       Failed to persist job. Status remains 'new'.")
                         else:
                             print(f"      [DRY RUN] Would save to database with following metadata:")
-                            print(f"                Ext ID: {job_data['external_id']}")
-                            print(f"                URL   : {job_data['url']}")
-                            print(f"                Mode  : {job_data['work_mode']}")
+                            print(f"                Src UID: {job_data['source_uid']}")
+                            print(f"                URL    : {job_data['job_url']}")
+                            print(f"                Mode   : {job_data['employment_mode']}")
                     else:
                         # Even if junk, we mark as parsed so we don't pick it up again
                         if not self.dry_run:
