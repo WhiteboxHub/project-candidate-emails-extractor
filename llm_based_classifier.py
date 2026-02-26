@@ -127,20 +127,72 @@ class LLMJobClassifyOrchestrator:
                             except:
                                 payload = {}
 
+                        # --- Helper functions to normalize raw values to valid DB enum values ---
+                        def normalize_position_type(raw: str) -> str:
+                            """Map raw contract/employment type strings to valid DB enum values."""
+                            raw = (raw or '').lower().replace(' ', '_').replace('-', '_')
+                            # W2, W-2 → contract
+                            if any(x in raw for x in ['w2', 'w_2', 'contract_to_hire', 'c2h', 'contract to hire']):
+                                return 'contract_to_hire' if 'hire' in raw else 'contract'
+                            if any(x in raw for x in ['c2c', 'corp', '1099', 'independent']):
+                                return 'contract'
+                            if 'full' in raw:
+                                return 'full_time'
+                            if 'intern' in raw:
+                                return 'internship'
+                            if 'contract' in raw:
+                                return 'contract'
+                            return 'full_time'  # Safe default
+
+                        def normalize_employment_mode(raw: str) -> str:
+                            """Map raw work mode strings to valid DB enum values."""
+                            raw = (raw or '').lower()
+                            if 'remote' in raw:
+                                return 'remote'
+                            if 'onsite' in raw or 'on-site' in raw or 'on site' in raw or 'office' in raw:
+                                return 'onsite'
+                            return 'hybrid'  # Safe default
+
                         job_data = {
-                            "title": title[:200], # Safety truncate
+                            # Title: prefer LLM-extracted title from description body,
+                            # fall back to raw_title (often an email subject line).
+                            "title": (result.get('extracted_title') or title)[:200],
                             "description": raw_job.get('raw_description'),
                             "company_name": company[:200],
-                            "employment_type": payload.get('employment_type', 'full_time'),
-                            "work_mode": payload.get('work_mode', 'hybrid'),
-                            "source": "email_bot_llm_local",
-                            "external_id": str(payload.get('post_id') or raw_job.get('source_uid') or raw_id),
-                            "location": raw_job.get('raw_location'),
-                            "country": payload.get('country', 'USA'),
-                            "url": payload.get('url') or payload.get('link') or "",
-                            "raw_position_id": raw_id,
+
+                            # Enum fields — normalized to valid DB values
+                            "position_type": normalize_position_type(
+                                payload.get('contract_type') or payload.get('employment_type') or ''
+                            ),
+                            "employment_mode": normalize_employment_mode(
+                                payload.get('work_mode') or payload.get('employment_mode') or ''
+                            ),
+
+                            # Source tracking — use values directly from raw_job record
+                            "source": raw_job.get('source', 'email_bot_llm_local'),
+                            "source_uid": raw_job.get('source_uid') or str(payload.get('post_id') or ''),
+                            "source_job_id": str(payload.get('post_id') or payload.get('linkedin_id') or ''),
+
+                            # Link back to the raw record that produced this job
+                            "created_from_raw_id": int(raw_id),
+
+                            # Location fields
+                            "location": raw_job.get('raw_location') or payload.get('location') or '',
+                            "zip": raw_job.get('raw_zip') or payload.get('raw_zip') or '',
+                            "country": payload.get('country') or 'USA',
+
+                            # Contact fields from payload
+                            "contact_email": payload.get('contact_email') or '',
+                            "contact_phone": payload.get('contact_phone') or '',
+
+                            # Job URL
+                            "job_url": payload.get('post_url') or payload.get('url') or payload.get('link') or '',
+
+                            # Notes: store keyword match reasons for auditing
+                            "notes": payload.get('job_matches') or '',
+
+                            # Scoring
                             "confidence_score": result['score'],
-                            "classification_label": result['label']
                         }
                         
                         if not self.dry_run:

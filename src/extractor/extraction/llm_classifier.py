@@ -67,7 +67,8 @@ class LLMJobClassifier:
             "{\n"
             "  \"reasoning\": \"One sentence explanation\",\n"
             "  \"label\": \"valid_job\" or \"junk\",\n"
-            "  \"confidence\": number between 0.0 and 1.0\n"
+            "  \"confidence\": number between 0.0 and 1.0,\n"
+            "  \"extracted_title\": \"The precise job title extracted from the text, or null if not found\"\n"
             "}"
         )
 
@@ -147,6 +148,7 @@ class LLMJobClassifier:
                 label = result.get('label', 'junk').lower()
                 score = float(result.get('confidence', 0.5))
                 reasoning = result.get('reasoning', 'No reasoning provided')
+                extracted_title = result.get('extracted_title') or None
                 
                 is_valid = (label == 'valid_job') and (score >= self.threshold)
                 
@@ -154,12 +156,15 @@ class LLMJobClassifier:
                 status_label = "VALID" if is_valid else "JUNK"
                 self.logger.info(f"  [LLM] Result: {status_label} (score: {score:.2f})")
                 self.logger.info(f"  [LLM] Logic : {reasoning}")
+                if extracted_title:
+                    self.logger.info(f"  [LLM] Title : {extracted_title}")
 
                 return {
                     'label': "valid" if is_valid else "junk",
                     'score': score,
                     'is_valid': is_valid,
                     'reasoning': reasoning,
+                    'extracted_title': extracted_title,
                     'raw_llm_output': output_text
                 }
 
