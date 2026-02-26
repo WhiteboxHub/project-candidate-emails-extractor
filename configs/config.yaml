@@ -22,6 +22,10 @@ extraction:
     - spacy      # NER-based entity extraction
     - gliner     # Modern zero-shot NER (UPDATED!)
   
+  # Strict Vendor/Recruiter Filtering (NEW)
+  # If true, only extracts contacts with valid recruiter job titles or context
+  # strict_recruiter_check: true
+
   # Gmail and personal email blocking
   block_gmail: true  # Completely block Gmail and personal email addresses
   block_personal_emails: true  # Block all personal email domains

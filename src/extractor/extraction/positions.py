@@ -32,53 +32,54 @@ class PositionExtractor:
         
         # COMPREHENSIVE Regex patterns for job position extraction
         # Ordered by specificity (most specific first)
+        # RELAXED: Allow _ at start of patterns to capture "_Senior Developer" etc.
         self.position_patterns = [
             # SUBJECT LINE PATTERNS (very common in recruiter emails)
             
             # "Technical Interview - GenAI Architect" or "Interview for Senior Engineer"
-            r'(?:technical\s+)?(?:interview|screening|discussion)(?:\s*[-–—_]\s*|\s+for\s+)([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|SDET|QA))',
+            r'(?:technical\s+)?(?:interview|screening|discussion)(?:\s*[-–—_]\s*|\s+for\s+)([A-Z_][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|SDET|QA))',
             
             # "Job Google ADK AI Engineer is shared with you" or "Job AI Engineer is shared"
-            r'(?:job|position|role)\s+(?:[A-Za-z0-9]+\s+){0,4}([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|Programmer|Tester|Scientist|Researcher|SRE|DevOps|SDET|QA))\s+is\s+shared',
+            r'(?:job|position|role)\s+(?:[A-Za-z0-9]+\s+){0,4}([A-Z_][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|Programmer|Tester|Scientist|Researcher|SRE|DevOps|SDET|QA))\s+is\s+shared',
             
             # "Urgent Requirement || Google ADK AI Engineer ||" or "W2/ C2C || Lead Java Developer ||"
-            r'(?:requirement|opening|opportunity|position|role|job)\s*\|\|?\s*(?:[A-Za-z0-9&]+\s+){0,3}([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|Programmer|Tester|Scientist|Researcher|SRE|DevOps|SDET|QA))',
+            r'(?:requirement|opening|opportunity|position|role|job)\s*\|\|?\s*(?:[A-Za-z0-9&]+\s+){0,3}([A-Z_][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|Programmer|Tester|Scientist|Researcher|SRE|DevOps|SDET|QA))',
             
             # "Gen AI Engineer Irving,TX" or "GenAI Architect - Charlotte"
-            r'^([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|SRE|DevOps|SDET|QA))\s*[-–—,]\s*[A-Z][a-z]+',
+            r'^([A-Z_][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|SRE|DevOps|SDET|QA))\s*[-–—,]\s*[A-Z][a-z]+',
             
             # "Fulltime Software Engineering Director Job at Dallas"
-            r'\b(?:fulltime|full-time|part-time|contract)?\s*([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|SRE|DevOps|SDET|QA))\s+(?:job|position|role|opening)',
+            r'\b(?:fulltime|full-time|part-time|contract)?\s*([A-Z_][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|SRE|DevOps|SDET|QA))\s+(?:job|position|role|opening)',
             
             # "Looking for Gen AI Engineer /Lead" or "seeking GenAI Architect"
-            r'(?:looking for|seeking|hiring|need|require|searching for)\s+(?:a\s+|an\s+)?([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Administrator|Coordinator|Lead|Director|Programmer|Tester|Scientist|Researcher|SDET|QA))',
+            r'(?:looking for|seeking|hiring|need|require|searching for)\s+(?:a\s+|an\s+)?([A-Z_][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Administrator|Coordinator|Lead|Director|Programmer|Tester|Scientist|Researcher|SDET|QA))',
             
             # "JOB ROLE for Agentic AI Engineer" or "opening for AI Agent Developer"
-            r'(?:job\s+role|opening|vacancy|position)\s+for\s+(?:a\s+|an\s+)?([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|SDET|QA))',
+            r'(?:job\s+role|opening|vacancy|position)\s+for\s+(?:a\s+|an\s+)?([A-Z_][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|SDET|QA))',
             
             # "Lead Java Developer || Charlotte" or "Gen AI Lead || Dallas"
-            r'\|\|?\s*([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))\s*\|\|',
+            r'\|\|?\s*([A-Z_][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))\s*\|\|',
             
             # "Senior AI Engineer Opportunity" or "ML Research Engineering role"
-            r'([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|Researcher))\s+(?:opportunity|role|position|opening)',
+            r'([A-Z_][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|Researcher))\s+(?:opportunity|role|position|opening)',
             
             # "ML Ops Senior Engineer ::" or "AI/ML Engineer with Java"
-            r'([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))\s*(?:::|with|and)',
+            r'([A-Z_][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))\s*(?:::|with|and)',
             
             # "Immediate Hire - AI/ML Engineer" or "Urgent hiring - GenAI Architect"
-            r'(?:immediate|urgent|hot)\s+(?:hire|hiring|requirement|opening)\s*[-–—]\s*([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))',
+            r'(?:immediate|urgent|hot)\s+(?:hire|hiring|requirement|opening)\s*[-–—]\s*([A-Z_][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))',
             
             # "Direct Client job opportunity for AI Agent Developer"
-            r'(?:job\s+)?opportunity\s+for\s+([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))',
+            r'(?:job\s+)?opportunity\s+for\s+([A-Z_][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))',
             
             # "Onsite Confirmation : MLOPs + AI Engineer"
-            r'(?:confirmation|requirement)\s*:\s*([A-Z][\w\s/\-\.&+]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))',
+            r'(?:confirmation|requirement)\s*:\s*([A-Z_][\w\s/\-\.&+]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))',
             
             # "We have urgent open position for Generative AI Engineer"
-            r'(?:open\s+)?position\s+for\s+([A-Z][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))',
+            r'(?:open\s+)?position\s+for\s+([A-Z_][\w\s/\-\.&]+?(?:Developer|Engineer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director))',
             
             # Broad fallback - any capitalized phrase with job keywords
-            r'\b([A-Z][\w\s/\-\.&]*?(?:AI|ML|Data|Cloud|DevOps|Software|Full\s+Stack|Backend|Frontend|Mobile|Gen\s*AI|Machine\s+Learning|Agentic)[\w\s/\-\.&]*?(?:Engineer|Developer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|Scientist|Researcher|SDET|QA))\b',
+            r'\b([A-Z_][\w\s/\-\.&]*?(?:AI|ML|Data|Cloud|DevOps|Software|Full\s+Stack|Backend|Frontend|Mobile|Gen\s*AI|Machine\s+Learning|Agentic)[\w\s/\-\.&]*?(?:Engineer|Developer|Architect|Manager|Analyst|Designer|Consultant|Specialist|Lead|Director|Scientist|Researcher|SDET|QA))\b',
         ]
         
         # Common job title suffixes for validation - will be loaded from CSV

@@ -1,7 +1,7 @@
-from gliner import GLiNER
-from typing import Optional, Dict, List
 import logging
 import re
+from typing import Optional, Dict, List
+from src.extractor.filtering.repository import get_filter_repository
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +27,32 @@ class GLiNERExtractor:
         ])
         
         try:
+            from gliner import GLiNER
             self.model = GLiNER.from_pretrained(model_name)
             self.logger.info(f"GLiNER model loaded: {model_name}")
         except Exception as e:
             self.logger.error(f"Failed to load GLiNER: {str(e)}")
             raise
+            
+        # Load filter repository
+        self.filter_repo = get_filter_repository()
+        self._load_filters()
+    
+    def _load_filters(self):
+        """Load filters from repository"""
+        try:
+            keyword_lists = self.filter_repo.get_keyword_lists()
+            self.location_indicators = {kw.lower().strip() for kw in keyword_lists.get('ner_location_indicators', [])}
+            self.common_cities = {kw.lower().strip() for kw in keyword_lists.get('ner_common_cities', [])}
+            self.company_suffixes = {kw.lower().strip() for kw in keyword_lists.get('ner_company_suffixes', [])}
+            self.generic_company_terms = {kw.lower().strip() for kw in keyword_lists.get('generic_company_terms', [])}
+            self.logger.info(f"✓ GLiNER loaded {len(self.location_indicators)} location indicators, {len(self.common_cities)} cities from CSV")
+        except Exception as e:
+            self.logger.error(f"Error loading GLiNER filters: {str(e)}")
+            self.location_indicators = set()
+            self.common_cities = set()
+            self.company_suffixes = set()
+            self.generic_company_terms = set()
     
     def extract_entities(self, text: str) -> Dict[str, str]:
         """
@@ -81,63 +102,19 @@ class GLiNERExtractor:
         text_lower = text.lower().strip()
         text_clean = re.sub(r'[^\w\s]', '', text_lower)  # Remove punctuation
         
-        # Common location indicators
-        location_indicators = [
-            # US States (abbreviations and full names)
-            'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado', 'connecticut',
-            'delaware', 'florida', 'georgia', 'hawaii', 'idaho', 'illinois', 'indiana', 'iowa',
-            'kansas', 'kentucky', 'louisiana', 'maine', 'maryland', 'massachusetts', 'michigan',
-            'minnesota', 'mississippi', 'missouri', 'montana', 'nebraska', 'nevada', 'new hampshire',
-            'new jersey', 'new mexico', 'new york', 'north carolina', 'north dakota', 'ohio',
-            'oklahoma', 'oregon', 'pennsylvania', 'rhode island', 'south carolina', 'south dakota',
-            'tennessee', 'texas', 'utah', 'vermont', 'virginia', 'washington', 'west virginia',
-            'wisconsin', 'wyoming',
-            # State abbreviations
-            'ca', 'ny', 'tx', 'fl', 'il', 'pa', 'oh', 'ga', 'nc', 'mi', 'nj', 'va', 'wa', 'az',
-            'ma', 'tn', 'in', 'mo', 'md', 'wi', 'co', 'mn', 'sc', 'al', 'la', 'ky', 'or', 'ok',
-            'ct', 'ia', 'ut', 'ar', 'nv', 'ms', 'ks', 'nm', 'ne', 'wv', 'id', 'hi', 'nh', 'me',
-            'ri', 'mt', 'de', 'sd', 'nd', 'ak', 'dc', 'vt', 'wy',
-            # Common location suffixes
-            'city', 'town', 'county', 'state', 'province', 'region', 'area', 'district',
-            # Common location patterns
-            'united states', 'usa', 'us', 'uk', 'united kingdom', 'canada', 'australia',
-            # Directional indicators
-            'north', 'south', 'east', 'west', 'northern', 'southern', 'eastern', 'western',
-            'upper', 'lower', 'central', 'metro', 'greater'
-        ]
-        
-        # Check if text contains location indicators
-        for indicator in location_indicators:
-            if indicator in text_clean:
-                return True
+        # Check text words against location indicators (exact match for short ones)
+        text_words = set(text_clean.split())
+        for indicator in self.location_indicators:
+            if len(indicator) <= 3:
+                if indicator in text_words:
+                    return True
+            else:
+                if indicator in text_clean:
+                    return True
         
         # Check if it's a common city name
-        common_cities = [
-            'new york', 'los angeles', 'chicago', 'houston', 'phoenix', 'philadelphia',
-            'san antonio', 'san diego', 'dallas', 'san jose', 'austin', 'jacksonville',
-            'san francisco', 'indianapolis', 'columbus', 'fort worth', 'charlotte',
-            'seattle', 'denver', 'washington', 'boston', 'el paso', 'detroit', 'nashville',
-            'portland', 'oklahoma city', 'las vegas', 'memphis', 'louisville', 'baltimore',
-            'milwaukee', 'albuquerque', 'tucson', 'fresno', 'sacramento', 'kansas city',
-            'mesa', 'atlanta', 'omaha', 'colorado springs', 'raleigh', 'virginia beach',
-            'miami', 'oakland', 'minneapolis', 'tulsa', 'cleveland', 'wichita', 'arlington',
-            'tampa', 'new orleans', 'honolulu', 'london', 'paris', 'tokyo', 'sydney',
-            'toronto', 'vancouver', 'montreal', 'mumbai', 'delhi', 'bangalore', 'singapore'
-        ]
-        
-        if text_clean in common_cities:
+        if text_clean in self.common_cities:
             return True
-        
-        # Pattern: If text is just 1-2 words and looks like a location
-        words = text_clean.split()
-        if 1 <= len(words) <= 2:
-            # Check if it's all capitalized (common for locations in signatures)
-            if text.isupper() or (text[0].isupper() and all(w[0].isupper() for w in words if w)):
-                # If it doesn't contain common company suffixes, might be location
-                company_suffixes = ['inc', 'llc', 'corp', 'ltd', 'co', 'group', 'solutions', 'services', 'tech', 'systems']
-                if not any(text_lower.endswith(suffix) for suffix in company_suffixes):
-                    if len(words) == 1 and len(text) > 3 and text[0].isupper():
-                        return True
         
         return False
     
@@ -164,14 +141,23 @@ class GLiNERExtractor:
             return text[:2000]
     
     def _parse_entities(self, entities_raw: List[Dict]) -> Dict[str, str]:
-        """Parse GLiNER output to standardized format with validation"""
+        """Parse GLiNER output to standardized format with per-field confidence thresholds"""
         entities = {
             'name': None,
             'company': None,
             'location': None,
             'job_title': None
         }
-        
+
+        # Per-field minimum confidence thresholds
+        # Location is highest because it's easily confused with company names
+        FIELD_THRESHOLDS = {
+            'name':      0.55,
+            'company':   0.50,
+            'location':  0.65,
+            'job_title': 0.40,
+        }
+
         # Group by label type with scores
         candidates = {
             'name': [],
@@ -179,49 +165,65 @@ class GLiNERExtractor:
             'location': [],
             'job_title': []
         }
-        
+
         for entity in entities_raw:
             label = entity['label'].lower()
             text = entity['text'].strip()
             score = entity.get('score', 0)
-            
-            # Skip low confidence
+
+            # Skip globally low confidence (global floor from config)
             if score < self.threshold:
                 continue
-            
+
             # Skip obviously bad extractions
             if len(text) < 2 or len(text) > 100:
                 continue
-            
+
             # Categorize entities
             if 'person' in label or 'full name' in label or 'recruiter' in label:
+                field = 'name'
+                if score < FIELD_THRESHOLDS[field]:
+                    self.logger.debug(f"GLiNER: Skipping low-confidence name ({score:.2f}): {text}")
+                    continue
                 words = text.split()
                 # Valid names: 2-4 words, no numbers
                 if 2 <= len(words) <= 4 and not any(char.isdigit() for char in text):
                     candidates['name'].append((text, score))
-            
+
             elif 'company' in label or 'organization' in label or 'employer' in label:
+                field = 'company'
+                if score < FIELD_THRESHOLDS[field]:
+                    self.logger.debug(f"GLiNER: Skipping low-confidence company ({score:.2f}): {text}")
+                    continue
                 # Skip generic company terms
-                if text.lower() not in ['company', 'organization', 'firm', 'team']:
+                if text.lower() not in self.generic_company_terms and text.lower() not in ['company', 'organization', 'firm', 'team']:
                     # CRITICAL: Check if it's actually a location before adding as company
                     if not self._is_location(text):
                         candidates['company'].append((text, score))
                     else:
                         self.logger.debug(f"GLiNER: Rejected location as company: {text}")
-            
+
             elif 'location' in label or 'city' in label or 'address' in label:
+                field = 'location'
+                if score < FIELD_THRESHOLDS[field]:
+                    self.logger.debug(f"GLiNER: Skipping low-confidence location ({score:.2f}): {text}")
+                    continue
                 # Valid locations: no emails, no phone numbers
                 if '@' not in text and not any(char.isdigit() for c in text.split()[0:2] for char in c):
                     candidates['location'].append((text, score))
-            
+
             elif 'job title' in label or 'position' in label or 'role' in label:
+                field = 'job_title'
+                if score < FIELD_THRESHOLDS[field]:
+                    self.logger.debug(f"GLiNER: Skipping low-confidence title ({score:.2f}): {text}")
+                    continue
                 candidates['job_title'].append((text, score))
-        
+
         # Select best candidate for each field (highest score)
         for field, items in candidates.items():
             if items:
                 # Sort by score descending
                 items.sort(key=lambda x: x[1], reverse=True)
                 entities[field] = items[0][0]  # Take highest scored
-        
+
         return entities

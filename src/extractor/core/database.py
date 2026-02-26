@@ -97,6 +97,29 @@ class DatabaseClient:
             finally:
                 cursor.close()
 
+    def execute_many(self, query: str, params_list: list) -> int:
+        """
+        Execute a write query against multiple rows in a single batch (executemany).
+        Ideal for bulk INSERT / INSERT IGNORE operations.
+        Returns the total number of affected rows.
+        """
+        if not params_list:
+            return 0
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.executemany(query, params_list)
+                conn.commit()
+                affected = cursor.rowcount
+                logger.debug(f"execute_many: {affected} rows affected")
+                return affected
+            except mysql.connector.Error as e:
+                logger.error(f"Error in execute_many: {query}. Error: {e}")
+                conn.rollback()
+                raise
+            finally:
+                cursor.close()
+
 # Global instance accessor
 def get_db_client() -> DatabaseClient:
     return DatabaseClient()

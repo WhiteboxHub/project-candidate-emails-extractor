@@ -61,6 +61,11 @@ class SpacyNERExtractor:
         self.client_keywords = self._load_client_keywords()
         self.generic_terms = self._load_generic_terms()
         self.vendor_indicators = self._load_vendor_indicators()
+        
+        # NEW: Location indicators and city lists
+        self.location_indicators = self._load_list_filter('ner_location_indicators')
+        self.common_cities = self._load_list_filter('ner_common_cities')
+        self.ner_company_suffixes = self._load_list_filter('ner_company_suffixes')
     
     def _load_job_title_keywords(self) -> set:
         """Load job title keywords from filter repository (CSV only - no fallback)"""
@@ -157,21 +162,57 @@ class SpacyNERExtractor:
             self.logger.error(f"Failed to load generic terms from CSV: {str(e)} - using empty list")
             return []
     
-    def _load_vendor_indicators(self) -> list:
-        """Load vendor indicator phrases from CSV (CSV only - no fallback)"""
+    def _load_vendor_indicators(self) -> set:
+        """Load vendor indicators from filter repository (CSV)"""
         try:
             keyword_lists = self.filter_repo.get_keyword_lists()
             if 'vendor_indicators' in keyword_lists:
-                indicators = keyword_lists['vendor_indicators']
-                self.logger.info(f"✓ Loaded {len(indicators)} vendor indicators from CSV")
-                return indicators
-            else:
-                self.logger.error("⚠ vendor_indicators not found in CSV - using empty list")
-                return []
+                return {kw.lower().strip() for kw in keyword_lists['vendor_indicators']}
+            return set()
         except Exception as e:
-            self.logger.error(f"Failed to load vendor indicators from CSV: {str(e)} - using empty list")
-            return []
+            self.logger.error(f"Error loading vendor indicators: {str(e)}")
+            return set()
+
+    def _load_list_filter(self, category: str) -> set:
+        """Generic method to load keyword list from filter repository"""
+        try:
+            keyword_lists = self.filter_repo.get_keyword_lists()
+            if category in keyword_lists:
+                self.logger.info(f"✓ Loaded {len(keyword_lists[category])} {category} from CSV")
+                return {kw.lower().strip() for kw in keyword_lists[category]}
+            self.logger.warning(f"⚠ {category} not found in CSV")
+            return set()
+        except Exception as e:
+            self.logger.error(f"Error loading {category}: {str(e)}")
+            return set()
     
+    def extract_vendor_from_span(self, html_content: str) -> Dict[str, Optional[str]]:
+        """Extract vendor name and company from HTML span tags (e.g. <span>Name - Company</span>) with relaxed matching"""
+        try:
+            if not html_content:
+                return {'name': None, 'company': None}
+            
+            # Simple regex on HTML to find span content
+            # Pattern: <span ...>Name - Company</span>
+            # Relaxed: Allow _ in company parts (e.g. "_Acme Corp_")
+            span_pattern = r'<span[^>]*>\s*([A-Za-z0-9\s\.]+)\s*[:\-]+\s*([A-Za-z0-9_\-&. ]+)\s*</span>'
+            
+            match = re.search(span_pattern, html_content, re.IGNORECASE)
+            if match:
+                name = match.group(1).strip()
+                company = match.group(2).strip(' _')  # Strip spaces and underscores
+                
+                # Basic validation
+                if len(company) > 1 and len(company) < 100:
+                    self.logger.debug(f"✓ Extracted vendor info from span: {name} - {company}")
+                    return {'name': name, 'company': company}
+            
+            return {'name': None, 'company': None}
+            
+        except Exception as e:
+            self.logger.error(f"Error extracting vendor from span: {str(e)}")
+            return {'name': None, 'company': None}
+
     def extract_entities(self, text: str) -> Dict[str, str]:
         """
         Extract named entities from text
@@ -235,10 +276,79 @@ class SpacyNERExtractor:
                     if 2 <= len(words) <= 3 and not any(c.isdigit() for c in name):
                         return name
             
+            
             return None
         except Exception as e:
             self.logger.error(f"Error extracting name from signature: {str(e)}")
             return None
+
+    def extract_signature_info(self, text: str) -> Dict[str, Optional[str]]:
+        """
+        Extract structured info from email signature (Name, Title, Company).
+        
+        Returns:
+            Dict with keys: name, title, company, phone, email
+        """
+        result = {
+            'name': None,
+            'title': None,
+            'company': None,
+            'phone': None,
+            'email': None
+        }
+        try:
+            # 1. Finds blocks that look like signatures (bottom of email, short lines)
+            lines = text.split('\n')
+            
+            # Simple heuristic: Look at last 10 lines
+            sig_lines = lines[-15:] if len(lines) > 15 else lines
+            
+            # Find name line (usually starts with Thanks/Regards or is just a name)
+            name_idx = -1
+            
+            # Greeting patterns
+            greeting_pattern = r'^(?:Thanks|Regards|Best|Sincerely|Warm regards|Kind regards|Cheers),?\s*$'
+            
+            for i, line in enumerate(sig_lines):
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                # Check if this line is a greeting
+                if re.match(greeting_pattern, line, re.IGNORECASE):
+                    # Next non-empty line is likely the name
+                    for j in range(i + 1, len(sig_lines)):
+                        potential_name = sig_lines[j].strip()
+                        if potential_name:
+                            # Validate name
+                            words = potential_name.split()
+                            if 2 <= len(words) <= 4 and not any(c.isdigit() for c in potential_name):
+                                result['name'] = potential_name
+                                name_idx = j
+                                break
+                    if result['name']:
+                        break
+            
+            # If name found, look for title/company in subsequent lines
+            if name_idx != -1 and name_idx + 1 < len(sig_lines):
+                # Next line is often Title
+                potential_title = sig_lines[name_idx + 1].strip()
+                if potential_title and len(potential_title.split()) <= 6:
+                     # Basic validation: Shouldn't be a phone number or email
+                    if not re.search(r'\d', potential_title) and '@' not in potential_title:
+                        result['title'] = potential_title
+                
+                # Line after title is often Company
+                if name_idx + 2 < len(sig_lines):
+                    potential_company = sig_lines[name_idx + 2].strip()
+                    if potential_company and not result['company']:
+                        if self._is_valid_company_name(potential_company):
+                             result['company'] = self._clean_company_name(potential_company)
+
+            return result
+        except Exception as e:
+            self.logger.error(f"Error parsing signature info: {e}")
+            return result
     
     def extract_vendor_from_span(self, text: str) -> Dict[str, Optional[str]]:
         """Extract vendor name and company from HTML span tags or similar patterns
@@ -255,23 +365,24 @@ class SpacyNERExtractor:
         """
         try:
             # Multiple patterns to try (ordered by reliability)
+            # RELAXED PATTERNS: Allow special chars like _, (), ', - in company names and don't enforce leading Capital
+            company_chars = r"[a-zA-Z0-9\s&.,_()'\-]"
+            
             patterns = [
                 # Pattern 1: HTML tags with Name - Company (hyphen separator)
-                r'<(?:span|div|p|td|th|b|strong)[^>]*>\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*[-–—]\s*([A-Z][a-zA-Z0-9\s&.,]+?)\s*</(?:span|div|p|td|th|b|strong)>',
+                r'<(?:span|div|p|td|th|b|strong)[^>]*>\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*[-–—]\s*(' + company_chars + r'+?)\s*</(?:span|div|p|td|th|b|strong)>',
                 # Pattern 2: HTML tags with Name | Company (pipe separator)
-                r'<(?:span|div|p|td|th|b|strong)[^>]*>\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*\|\s*([A-Z][a-zA-Z0-9\s&.,]+?)\s*</(?:span|div|p|td|th|b|strong)>',
+                r'<(?:span|div|p|td|th|b|strong)[^>]*>\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*\|\s*(' + company_chars + r'+?)\s*</(?:span|div|p|td|th|b|strong)>',
                 # Pattern 3: HTML tags with Name, Company (comma separator)
-                r'<(?:span|div|p|td|th|b|strong)[^>]*>\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*,\s*([A-Z][a-zA-Z0-9\s&.,]+?)\s*</(?:span|div|p|td|th|b|strong)>',
+                r'<(?:span|div|p|td|th|b|strong)[^>]*>\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*,\s*(' + company_chars + r'+?)\s*</(?:span|div|p|td|th|b|strong)>',
                 # Pattern 4: HTML tags with Name (Company) (parentheses)
-                r'<(?:span|div|p|td|th|b|strong)[^>]*>\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*\(\s*([A-Z][a-zA-Z0-9\s&.,]+?)\s*\)\s*</(?:span|div|p|td|th|b|strong)>',
+                r'<(?:span|div|p|td|th|b|strong)[^>]*>\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*\(\s*(' + company_chars + r'+?)\s*\)\s*</(?:span|div|p|td|th|b|strong)>',
                 # Pattern 5: Plain text with Name - Company (for text emails)
-                r'(?:^|\n)\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*[-–—]\s*([A-Z][a-zA-Z0-9\s&.,]+?)\s*(?:$|\n)',
+                r'(?:^|\n)\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*[-–—]\s*(' + company_chars + r'+?)\s*(?:$|\n)',
                 # Pattern 6: Plain text with Name | Company
-                r'(?:^|\n)\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*\|\s*([A-Z][a-zA-Z0-9\s&.,]+?)\s*(?:$|\n)',
+                r'(?:^|\n)\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*\|\s*(' + company_chars + r'+?)\s*(?:$|\n)',
                 # Pattern 7: Name at Company format
-                r'<(?:span|div|p)[^>]*>\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s+at\s+([A-Z][a-zA-Z0-9\s&.,]+?)\s*</(?:span|div|p)>',
-                # Pattern 8: Signature-style Name\nCompany (newline separated in HTML)
-                r'<(?:span|div|p|b|strong)[^>]*>\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*</(?:span|div|p|b|strong)>\s*(?:<br\s*/?>|\n)\s*<(?:span|div|p)[^>]*>\s*([A-Z][a-zA-Z0-9\s&.,]+?)\s*</(?:span|div|p)>',
+                r'<(?:span|div|p)[^>]*>\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s+at\s+(' + company_chars + r'+?)\s*</(?:span|div|p)>',
             ]
             
             for pattern in patterns:
@@ -284,10 +395,10 @@ class SpacyNERExtractor:
                     name_words = name.split()
                     if 2 <= len(name_words) <= 4 and not any(c.isdigit() for c in name):
                         # Clean company name
-                        # Remove HTML tags, extra whitespace, trailing punctuation
+                        # Remove HTML tags, extra whitespace, trailing punctuation AND underscores
                         company = re.sub(r'<[^>]+>', '', company)  # Remove any HTML tags
                         company = re.sub(r'\s+', ' ', company)      # Normalize whitespace
-                        company = company.strip('.,;: ')
+                        company = company.strip('.,;: _-')          # Strip delimiters including _
                         
                         # Validate company (not empty, not too long, has letters)
                         if company and 1 < len(company) < 100 and any(c.isalpha() for c in company):
@@ -340,7 +451,7 @@ class SpacyNERExtractor:
         company_lower = company.lower()
         
         # 1. REJECT: Too long (likely a sentence fragment or email body text)
-        if len(company) > 50:
+        if len(company) > 60:
             self.logger.debug(f"❌ Company too long (sentence fragment): {company}")
             return False
         
@@ -410,7 +521,44 @@ class SpacyNERExtractor:
         if punctuation_count > 2:
             self.logger.debug(f"❌ Company has excessive punctuation: {company}")
             return False
-        
+
+        # 9a. REJECT: Unicode bullet characters from Google Calendar invite bodies
+        if '⋅' in company or '•' in company:
+            self.logger.debug(f"❌ Company contains calendar bullet char: {company}")
+            return False
+
+        # 9b. REJECT: Day-of-week substrings (Google Calendar invite fragments like
+        #     "Thursday Feb 26, 2026 ⋅ 3pm – 3:45pm")
+        if re.search(r'\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', company_lower):
+            self.logger.debug(f"❌ Company contains day-of-week (calendar fragment): {company}")
+            return False
+
+        # 9c. REJECT: Requisition / job-ID patterns (e.g. "AI-25237)", "REQ-1234")
+        if re.search(r'\b[A-Z]{1,4}-\d{3,}\)?$', company):
+            self.logger.debug(f"❌ Company looks like a requisition ID: {company}")
+            return False
+
+        # 9d. REJECT: Phone numbers embedded in string (e.g. "Desk : 609-998-5909")
+        if re.search(r':\s*\d{3}', company) or re.search(r'\d{3}[-.\s]\d{3}[-.\s]\d{4}', company):
+            self.logger.debug(f"❌ Company contains embedded phone number: {company}")
+            return False
+
+        # 9e. REJECT: Meeting platforms extracted as company names
+        meeting_platforms = ['google meet', 'zoom meeting', 'microsoft teams', 'webex', 'go to meeting']
+        if any(p in company_lower for p in meeting_platforms):
+            self.logger.debug(f"❌ Company is a meeting platform: {company}")
+            return False
+
+        # 9f. REJECT: "Your attendance is optional" / modal verb phrases from calendar
+        calendar_phrases = [
+            'your attendance', 'is optional', 'is required', 'shared earlier',
+            'please join', 'join the meeting', 'join us', 'click here',
+        ]
+        if any(phrase in company_lower for phrase in calendar_phrases):
+            self.logger.debug(f"❌ Company is calendar/invite phrase: {company}")
+            return False
+
+
         # 10. REJECT: Ends with incomplete sentence indicators
         incomplete_endings = [' and', ' or', ' the', ' a', ' an', ' to', ' for', ' with', ' in', ' on', ' at']
         if any(company_lower.endswith(ending) for ending in incomplete_endings):
@@ -471,8 +619,7 @@ class SpacyNERExtractor:
             self.logger.debug(f"Penalty: Too short ({name})")
         
         # BONUS: Company has common business suffix (Inc, LLC, Corp, Ltd, etc.)
-        company_suffixes = ['inc', 'llc', 'corp', 'ltd', 'limited', 'corporation', 'incorporated', 'co', 'company', 'group', 'solutions', 'services', 'technologies', 'tech', 'systems']
-        if any(name.lower().endswith(suffix) or f' {suffix}' in name.lower() for suffix in company_suffixes):
+        if self.ner_company_suffixes and any(name.lower().endswith(suffix) or f' {suffix}' in name.lower() for suffix in self.ner_company_suffixes):
             score += 0.10
             self.logger.debug(f"Bonus: Company suffix detected ({name})")
         
@@ -592,36 +739,9 @@ class SpacyNERExtractor:
         text_lower = text.lower().strip()
         text_clean = re.sub(r'[^\w\s]', '', text_lower)  # Remove punctuation
         
-        # Common location indicators
-        location_indicators = [
-            # US States (abbreviations and full names)
-            'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado', 'connecticut',
-            'delaware', 'florida', 'georgia', 'hawaii', 'idaho', 'illinois', 'indiana', 'iowa',
-            'kansas', 'kentucky', 'louisiana', 'maine', 'maryland', 'massachusetts', 'michigan',
-            'minnesota', 'mississippi', 'missouri', 'montana', 'nebraska', 'nevada', 'new hampshire',
-            'new jersey', 'new mexico', 'new york', 'north carolina', 'north dakota', 'ohio',
-            'oklahoma', 'oregon', 'pennsylvania', 'rhode island', 'south carolina', 'south dakota',
-            'tennessee', 'texas', 'utah', 'vermont', 'virginia', 'washington', 'west virginia',
-            'wisconsin', 'wyoming',
-            # State abbreviations
-            'ca', 'ny', 'tx', 'fl', 'il', 'pa', 'oh', 'ga', 'nc', 'mi', 'nj', 'va', 'wa', 'az',
-            'ma', 'tn', 'in', 'mo', 'md', 'wi', 'co', 'mn', 'sc', 'al', 'la', 'ky', 'or', 'ok',
-            'ct', 'ia', 'ut', 'ar', 'nv', 'ms', 'ks', 'nm', 'ne', 'wv', 'id', 'hi', 'nh', 'me',
-            'ri', 'mt', 'de', 'sd', 'nd', 'ak', 'dc', 'vt', 'wy',
-            # Common location suffixes
-            'city', 'town', 'county', 'state', 'province', 'region', 'area', 'district',
-            # Common location patterns
-            'united states', 'usa', 'us', 'uk', 'united kingdom', 'canada', 'australia',
-            # Directional indicators (often part of location names)
-            'north', 'south', 'east', 'west', 'northern', 'southern', 'eastern', 'western',
-            'upper', 'lower', 'central', 'metro', 'greater'
-        ]
-        
         # Check if text contains location indicators (WITH WORD BOUNDARIES)
-        # CRITICAL FIX: Use exact word matching for short indicators (like state codes 'ca', 'al')
-        # otherwise 'Sibitalent' matches 'al' and gets rejected.
         text_words = set(text_clean.split())
-        for indicator in location_indicators:
+        for indicator in self.location_indicators:
             # For short indicators (len <= 3), require exact match
             if len(indicator) <= 3:
                 if indicator in text_words:
@@ -633,27 +753,10 @@ class SpacyNERExtractor:
                     self.logger.debug(f"Rejected location as company: {text} (contains '{indicator}')")
                     return True
         
-        # Check if it's a common city name pattern (single word, capitalized, common city names)
-        common_cities = [
-            'new york', 'los angeles', 'chicago', 'houston', 'phoenix', 'philadelphia',
-            'san antonio', 'san diego', 'dallas', 'san jose', 'austin', 'jacksonville',
-            'san francisco', 'indianapolis', 'columbus', 'fort worth', 'charlotte',
-            'seattle', 'denver', 'washington', 'boston', 'el paso', 'detroit', 'nashville',
-            'portland', 'oklahoma city', 'las vegas', 'memphis', 'louisville', 'baltimore',
-            'milwaukee', 'albuquerque', 'tucson', 'fresno', 'sacramento', 'kansas city',
-            'mesa', 'atlanta', 'omaha', 'colorado springs', 'raleigh', 'virginia beach',
-            'miami', 'oakland', 'minneapolis', 'tulsa', 'cleveland', 'wichita', 'arlington',
-            'tampa', 'new orleans', 'honolulu', 'london', 'paris', 'tokyo', 'sydney',
-            'toronto', 'vancouver', 'montreal', 'mumbai', 'delhi', 'bangalore', 'singapore'
-        ]
-        
-        if text_clean in common_cities:
+        # Check if it's a common city name pattern
+        if text_clean in self.common_cities:
             self.logger.debug(f"Rejected known city as company: {text}")
             return True
-        
-        # Pattern: If text is just 1-2 words and looks like a location (all caps or title case, no numbers)
-        # REMOVED AGGRESSIVE CHECK: This was rejecting valid single-word companies (e.g. "Google", "Stripe")
-        # that don't have suffixes. We should rely on the explicit location lists above instead.
         
         return False
         

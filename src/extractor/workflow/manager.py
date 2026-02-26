@@ -3,130 +3,140 @@ import json
 import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
-from ..core.database import get_db_client
 
 logger = logging.getLogger(__name__)
 
+
 class WorkflowManager:
     """
-    Manages the lifecycle of automation workflows:
-    - Loading configuration
-    - Tracking execution status in logs
+    Manages the lifecycle of automation workflows via the wbl-backend REST API.
+
+    All SQL queries have been replaced with API calls:
+      - get_workflow_config()   → GET  /api/automation-workflow/by-key/{key}
+      - start_run()             → POST /api/automation-workflow-log/
+      - update_run_status()     → PATCH /api/automation-workflow-log/by-run-id/{run_id}
+      - update_schedule_status()→ PUT  /api/automation-workflow-schedule/{id}
     """
-    
-    def __init__(self):
-        self.db_client = get_db_client()
+
+    def __init__(self, api_client):
+        """
+        api_client: an instance of APIClient (src.extractor.connectors.http_api.APIClient).
+        """
+        self.api_client = api_client
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Workflow config
+    # ─────────────────────────────────────────────────────────────────────────
 
     def get_workflow_config(self, workflow_key: str) -> Optional[Dict[str, Any]]:
         """
-        Fetch active workflow configuration by key.
+        Fetch active workflow configuration by key via API.
         """
-        query = """
-        SELECT 
-            id, workflow_key, name, status, 
-            credentials_list_sql, recipient_list_sql, 
-            parameters_config
-        FROM automation_workflows 
-        WHERE workflow_key = %s AND status = 'active'
-        LIMIT 1
-        """
-        results = self.db_client.execute_query(query, (workflow_key,))
-        
-        if not results:
-            logger.error(f"Workflow '{workflow_key}' not found or not active.")
+        try:
+            config = self.api_client.get(f"/api/automation-workflow/by-key/{workflow_key}")
+            if not config:
+                logger.error("Workflow '%s' not found or not active.", workflow_key)
+                return None
+            # parameters_config may come back already parsed (dict) or as JSON string
+            if isinstance(config.get("parameters_config"), str):
+                try:
+                    config["parameters_config"] = json.loads(config["parameters_config"])
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Failed to parse parameters_config for workflow %s", workflow_key
+                    )
+            return config
+        except Exception as e:
+            logger.error("Failed to fetch workflow config for key '%s': %s", workflow_key, e)
             return None
-            
-        config = results[0]
-        # Parse JSON config if it's a string, otherwise it's already a dict/list
-        if isinstance(config.get('parameters_config'), str):
-             try:
-                 config['parameters_config'] = json.loads(config['parameters_config'])
-             except json.JSONDecodeError:
-                 logger.warning(f"Failed to parse parameters_config for workflow {workflow_key}")
 
-        return config
+    # ─────────────────────────────────────────────────────────────────────────
+    # Run lifecycle
+    # ─────────────────────────────────────────────────────────────────────────
 
-    def start_run(self, workflow_id: int, schedule_id: Optional[int] = None, parameters: Optional[Dict] = None) -> str:
+    def start_run(
+        self,
+        workflow_id: int,
+        schedule_id: Optional[int] = None,
+        parameters: Optional[Dict] = None,
+    ) -> str:
         """
-        Create a new log entry with status 'running'.
+        Create a new workflow log entry with status 'running'.
         Returns the run_id (UUID).
         """
         run_id = str(uuid.uuid4())
-        
-        # Serialize parameters if provided
-        parameters_json = json.dumps(parameters) if parameters else None
-        
-        query = """
-        INSERT INTO automation_workflow_logs 
-        (workflow_id, schedule_id, run_id, status, parameters_used, started_at) 
-        VALUES (%s, %s, %s, 'running', %s, NOW(6))
-        """
-        
+        payload = {
+            "workflow_id": workflow_id,
+            "run_id": run_id,
+            "status": "running",
+            "started_at": datetime.utcnow().isoformat(),
+            "records_processed": 0,
+            "records_failed": 0,
+        }
+        if schedule_id is not None:
+            payload["schedule_id"] = schedule_id
+        if parameters:
+            payload["parameters_used"] = parameters
+
         try:
-            self.db_client.execute_non_query(query, (workflow_id, schedule_id, run_id, parameters_json))
-            logger.info(f"Started workflow run {run_id} for workflow_id {workflow_id}")
+            self.api_client.post("/api/automation-workflow-log/", payload)
+            logger.info("Started workflow run %s for workflow_id %s", run_id, workflow_id)
             return run_id
         except Exception as e:
-            logger.error(f"Failed to start workflow run: {e}")
+            logger.error("Failed to start workflow run: %s", e)
             raise
 
-    def update_run_status(self, run_id: str, status: str, 
-                          records_processed: int = 0, 
-                          records_failed: int = 0,
-                          error_summary: Optional[str] = None,
-                          error_details: Optional[str] = None,
-                          execution_metadata: Optional[Dict] = None):
+    def update_run_status(
+        self,
+        run_id: str,
+        status: str,
+        records_processed: int = 0,
+        records_failed: int = 0,
+        error_summary: Optional[str] = None,
+        error_details: Optional[str] = None,
+        execution_metadata: Optional[Dict] = None,
+    ):
         """
-        Update the status of a running workflow.
+        Update the status of a running workflow log entry by run_id.
         """
-        # Serialize metadata
-        metadata_json = json.dumps(execution_metadata) if execution_metadata else None
-        
-        query = """
-        UPDATE automation_workflow_logs 
-        SET 
-            status = %s,
-            records_processed = %s,
-            records_failed = %s,
-            error_summary = %s,
-            error_details = %s,
-            execution_metadata = %s,
-            finished_at = CASE WHEN %s IN ('success', 'failed', 'partial_success', 'timed_out') THEN NOW(6) ELSE finished_at END,
-            updated_at = NOW(6)
-        WHERE run_id = %s
-        """
-        
-        # Truncate error summary if needed
         if error_summary and len(error_summary) > 255:
             error_summary = error_summary[:252] + "..."
-            
+
+        payload: Dict[str, Any] = {
+            "status": status,
+            "records_processed": records_processed,
+            "records_failed": records_failed,
+        }
+        if error_summary:
+            payload["error_summary"] = error_summary
+        if error_details:
+            payload["error_details"] = error_details
+        if execution_metadata:
+            payload["execution_metadata"] = execution_metadata
+        # Set finished_at for terminal states
+        if status in ("success", "failed", "partial_success", "timed_out"):
+            payload["finished_at"] = datetime.utcnow().isoformat()
+
         try:
-            self.db_client.execute_non_query(
-                query, 
-                (status, records_processed, records_failed, error_summary, error_details, metadata_json, status, run_id)
+            self.api_client.patch(
+                f"/api/automation-workflow-log/by-run-id/{run_id}", payload
             )
-            logger.info(f"Updated run {run_id} status to {status}")
+            logger.info("Updated run %s status to %s", run_id, status)
         except Exception as e:
-            logger.error(f"Failed to update run status for {run_id}: {e}")
-            # Don't raise here to avoid crashing the cleanup logic in finally blocks
+            logger.error("Failed to update run status for %s: %s", run_id, e)
+            # Don't raise — avoid crashing the cleanup logic in finally blocks
 
     def update_schedule_status(self, schedule_id: int):
         """
-        Update the schedule's next run time (placeholder logic)
-        Assumes automation_workflows_schedule table exists.
+        Update the schedule's last_run_at via the existing schedule PUT endpoint.
         """
         if not schedule_id:
             return
-            
-        # TODO: Implement actual next_run calculation based on cron/interval
-        # For now, we just update last_run_at
-        query = """
-        UPDATE automation_workflows_schedule
-        SET last_run_at = NOW(6)
-        WHERE id = %s
-        """
         try:
-            self.db_client.execute_non_query(query, (schedule_id,))
-            logger.info(f"Updated schedule {schedule_id} last_run_at")
+            self.api_client.put(
+                f"/api/automation-workflow-schedule/{schedule_id}",
+                {"last_run_at": datetime.utcnow().isoformat()},
+            )
+            logger.info("Updated schedule %s last_run_at", schedule_id)
         except Exception as e:
-            logger.error(f"Failed to update schedule {schedule_id}: {e}")
+            logger.error("Failed to update schedule %s: %s", schedule_id, e)

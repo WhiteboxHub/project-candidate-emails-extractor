@@ -18,8 +18,7 @@ __pycache__/
 venv/
 env/
 ENV/
-myenv/
-.venv/
+.env.example
 
 # Test outputs
 test_results_*.json
@@ -44,8 +43,6 @@ Thumbs.db
 models/*.pkl
 models/*.pt
 models/*.bin
-models/*.safetensors
-models/bert_binary_classifier/
 
 # Spacy
 *.vectors
@@ -74,21 +71,10 @@ START_HERE.md
 # Setup files
 complete_setup.sql
 setup_job_type.sql
-# Temporary/Diagnostic scripts
-probe_*.py
-diag_*.py
-debug_*.py
-test_*.py
-verify_*.py
-*.log
-verify_run.log
-full_log.txt
-load_error.txt
-probe_output.txt
-diag_output.txt
-final_verify.log
-final_test.log
-verify_run.log
-classification_audit.log
-models
-myenv
+validate_setup.py
+test_my_account.py
+test_improvements.py
+
+# Output files
+output/
+test_my_account_fixed.py

@@ -30,6 +30,9 @@ class DatabaseCandidateSource:
         try:
             results = self.db_client.execute_query(self.credentials_sql)
             
+            if results:
+                logger.debug(f"DB Columns found: {list(results[0].keys())}")
+            
             candidates = []
             for row in results:
                 resolved_candidate_id = self._pick(
