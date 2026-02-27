@@ -141,14 +141,23 @@ class GLiNERExtractor:
             return text[:2000]
     
     def _parse_entities(self, entities_raw: List[Dict]) -> Dict[str, str]:
-        """Parse GLiNER output to standardized format with validation"""
+        """Parse GLiNER output to standardized format with per-field confidence thresholds"""
         entities = {
             'name': None,
             'company': None,
             'location': None,
             'job_title': None
         }
-        
+
+        # Per-field minimum confidence thresholds
+        # Location is highest because it's easily confused with company names
+        FIELD_THRESHOLDS = {
+            'name':      0.55,
+            'company':   0.50,
+            'location':  0.65,
+            'job_title': 0.40,
+        }
+
         # Group by label type with scores
         candidates = {
             'name': [],
@@ -156,28 +165,36 @@ class GLiNERExtractor:
             'location': [],
             'job_title': []
         }
-        
+
         for entity in entities_raw:
             label = entity['label'].lower()
             text = entity['text'].strip()
             score = entity.get('score', 0)
-            
-            # Skip low confidence
+
+            # Skip globally low confidence (global floor from config)
             if score < self.threshold:
                 continue
-            
+
             # Skip obviously bad extractions
             if len(text) < 2 or len(text) > 100:
                 continue
-            
+
             # Categorize entities
             if 'person' in label or 'full name' in label or 'recruiter' in label:
+                field = 'name'
+                if score < FIELD_THRESHOLDS[field]:
+                    self.logger.debug(f"GLiNER: Skipping low-confidence name ({score:.2f}): {text}")
+                    continue
                 words = text.split()
                 # Valid names: 2-4 words, no numbers
                 if 2 <= len(words) <= 4 and not any(char.isdigit() for char in text):
                     candidates['name'].append((text, score))
-            
+
             elif 'company' in label or 'organization' in label or 'employer' in label:
+                field = 'company'
+                if score < FIELD_THRESHOLDS[field]:
+                    self.logger.debug(f"GLiNER: Skipping low-confidence company ({score:.2f}): {text}")
+                    continue
                 # Skip generic company terms
                 if text.lower() not in self.generic_company_terms and text.lower() not in ['company', 'organization', 'firm', 'team']:
                     # CRITICAL: Check if it's actually a location before adding as company
@@ -185,20 +202,28 @@ class GLiNERExtractor:
                         candidates['company'].append((text, score))
                     else:
                         self.logger.debug(f"GLiNER: Rejected location as company: {text}")
-            
+
             elif 'location' in label or 'city' in label or 'address' in label:
+                field = 'location'
+                if score < FIELD_THRESHOLDS[field]:
+                    self.logger.debug(f"GLiNER: Skipping low-confidence location ({score:.2f}): {text}")
+                    continue
                 # Valid locations: no emails, no phone numbers
                 if '@' not in text and not any(char.isdigit() for c in text.split()[0:2] for char in c):
                     candidates['location'].append((text, score))
-            
+
             elif 'job title' in label or 'position' in label or 'role' in label:
+                field = 'job_title'
+                if score < FIELD_THRESHOLDS[field]:
+                    self.logger.debug(f"GLiNER: Skipping low-confidence title ({score:.2f}): {text}")
+                    continue
                 candidates['job_title'].append((text, score))
-        
+
         # Select best candidate for each field (highest score)
         for field, items in candidates.items():
             if items:
                 # Sort by score descending
                 items.sort(key=lambda x: x[1], reverse=True)
                 entities[field] = items[0][0]  # Take highest scored
-        
+
         return entities
