@@ -451,7 +451,7 @@ class SpacyNERExtractor:
         company_lower = company.lower()
         
         # 1. REJECT: Too long (likely a sentence fragment or email body text)
-        if len(company) > 50:
+        if len(company) > 60:
             self.logger.debug(f"❌ Company too long (sentence fragment): {company}")
             return False
         
@@ -521,7 +521,44 @@ class SpacyNERExtractor:
         if punctuation_count > 2:
             self.logger.debug(f"❌ Company has excessive punctuation: {company}")
             return False
-        
+
+        # 9a. REJECT: Unicode bullet characters from Google Calendar invite bodies
+        if '⋅' in company or '•' in company:
+            self.logger.debug(f"❌ Company contains calendar bullet char: {company}")
+            return False
+
+        # 9b. REJECT: Day-of-week substrings (Google Calendar invite fragments like
+        #     "Thursday Feb 26, 2026 ⋅ 3pm – 3:45pm")
+        if re.search(r'\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', company_lower):
+            self.logger.debug(f"❌ Company contains day-of-week (calendar fragment): {company}")
+            return False
+
+        # 9c. REJECT: Requisition / job-ID patterns (e.g. "AI-25237)", "REQ-1234")
+        if re.search(r'\b[A-Z]{1,4}-\d{3,}\)?$', company):
+            self.logger.debug(f"❌ Company looks like a requisition ID: {company}")
+            return False
+
+        # 9d. REJECT: Phone numbers embedded in string (e.g. "Desk : 609-998-5909")
+        if re.search(r':\s*\d{3}', company) or re.search(r'\d{3}[-.\s]\d{3}[-.\s]\d{4}', company):
+            self.logger.debug(f"❌ Company contains embedded phone number: {company}")
+            return False
+
+        # 9e. REJECT: Meeting platforms extracted as company names
+        meeting_platforms = ['google meet', 'zoom meeting', 'microsoft teams', 'webex', 'go to meeting']
+        if any(p in company_lower for p in meeting_platforms):
+            self.logger.debug(f"❌ Company is a meeting platform: {company}")
+            return False
+
+        # 9f. REJECT: "Your attendance is optional" / modal verb phrases from calendar
+        calendar_phrases = [
+            'your attendance', 'is optional', 'is required', 'shared earlier',
+            'please join', 'join the meeting', 'join us', 'click here',
+        ]
+        if any(phrase in company_lower for phrase in calendar_phrases):
+            self.logger.debug(f"❌ Company is calendar/invite phrase: {company}")
+            return False
+
+
         # 10. REJECT: Ends with incomplete sentence indicators
         incomplete_endings = [' and', ' or', ' the', ' a', ' an', ' to', ' for', ' with', ' in', ' on', ' at']
         if any(company_lower.endswith(ending) for ending in incomplete_endings):

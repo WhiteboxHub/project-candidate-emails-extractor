@@ -16,6 +16,8 @@ __pycache__/
 *.so
 .Python
 venv/
+myenv/
+models/
 env/
 ENV/
 .env.example

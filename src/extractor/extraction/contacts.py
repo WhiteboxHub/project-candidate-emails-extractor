@@ -32,6 +32,7 @@ class ContactExtractor:
         self.greeting_patterns = self._load_greeting_patterns()
         self.company_indicators = self._load_company_indicators()
         self.skip_keywords = self._load_skip_keywords()
+        self.junk_name_patterns = self._load_junk_name_patterns()
         
         # Initialize extractors based on config
         enabled_methods = config.get('extraction', {}).get('enabled_methods', ['regex', 'spacy'])
@@ -112,6 +113,21 @@ class ContactExtractor:
                 return []
         except Exception as e:
             self.logger.error(f"Failed to load skip keywords from CSV: {str(e)} - using empty list")
+            return []
+
+    def _load_junk_name_patterns(self) -> list:
+        """Load junk_name_patterns from CSV — words that are never valid person names"""
+        try:
+            keyword_lists = self.filter_repo.get_keyword_lists()
+            if 'junk_name_patterns' in keyword_lists:
+                patterns = keyword_lists['junk_name_patterns']
+                self.logger.info(f"✓ Loaded {len(patterns)} junk name patterns from CSV")
+                return patterns
+            else:
+                self.logger.warning("⚠ junk_name_patterns not found in CSV - using empty list")
+                return []
+        except Exception as e:
+            self.logger.error(f"Failed to load junk_name_patterns from CSV: {str(e)} - using empty list")
             return []
     
     def extract_contacts(self, email_message, clean_body: str, source_email: str, subject: str = None) -> List[Dict]:
@@ -251,21 +267,35 @@ class ContactExtractor:
                 
                 # Extract name if not found from span
                 if not contact['name']:
+                    # PRIORITY 0: Signature label parser (e.g. "Name: John Smith" in sig block)
+                    # Near-100% precision when present — check BEFORE fallback chain
+                    sig_labels = self._parse_signature_labels(clean_body)
+                    if sig_labels.get('name') and self._is_valid_person_name(sig_labels['name']):
+                        candidate_first = source_email.split('@')[0].split('.')[0].split('_')[0].lower()
+                        if not (len(candidate_first) >= 3 and sig_labels['name'].lower().startswith(candidate_first)):
+                            contact['name'] = sig_labels['name']
+                            self.logger.debug(f"✓ Priority 0 (sig label): {contact['name']}")
+
+                    # Priority 0 also provides company if not already found
+                    if not contact['company'] and sig_labels.get('company'):
+                        contact['company'] = sig_labels['company']
+                        self.logger.debug(f"✓ Priority 0 company (sig label): {contact['company']}")
+
                     # PRIORITY 1: Extract name from the specific header that contained this email
-                    header_name = self._extract_name_from_header_for_email(email_message, contact['email'])
-                    if header_name and not self._is_candidate_name(header_name, source_email):
-                        contact['name'] = header_name
-                    
-                    
+                    if not contact['name']:
+                        header_name = self._extract_name_from_header_for_email(email_message, contact['email'])
+                        if header_name and not self._is_candidate_name(header_name, source_email):
+                            contact['name'] = header_name
+
                     # PRIORITY 2: Try signature extraction (but validate it's not candidate)
                     if not contact['name'] and signature_info.get('name'):
                         signature_name = signature_info['name']
                         if signature_name and not self._is_candidate_name(signature_name, source_email):
                             contact['name'] = signature_name
-                    
-                    # PRIORITY 3: Fallback to name from email address
-                    if not contact['name']:
-                        contact['name'] = self._extract_name_from_email(contact['email'])
+
+                    # PRIORITY 3 (email local-part) deliberately removed — produces junk names
+                    # like "Recruiting", "Booking", "Noreply". Email local-part is zero-signal
+                    # for person names. Better to have no name than wrong name.
                 
                 # Extract phone
                 contact['phone'] = self._extract_field('phone', clean_body, email_message)
@@ -463,22 +493,279 @@ class ContactExtractor:
             if not contact['email'] and not contact['linkedin_id']:
                 self.logger.debug("No email or LinkedIn found - invalid contact")
                 return contact
-            
+
+            # ── NAME VALIDATION (positive format gate) ───────────────────────
+            if contact.get('name'):
+                name_lower = contact['name'].lower().strip()
+
+                # Positive gate first: must structurally look like a human name
+                if not self._is_valid_person_name(contact['name']):
+                    self.logger.debug(f"❌ Name fails format gate: {contact['name']}")
+                    contact['name'] = None
+
+                # Reject names that match known junk patterns from CSV
+                elif any(junk in name_lower for junk in self.junk_name_patterns):
+                    self.logger.debug(f"❌ Name matches junk_name_patterns: {contact['name']}")
+                    contact['name'] = None
+
+                # Reject names that match greeting_patterns or company_indicators
+                elif any(p in name_lower for p in self.greeting_patterns):
+                    self.logger.debug(f"❌ Name matches greeting_patterns: {contact['name']}")
+                    contact['name'] = None
+
+                elif any(p in name_lower for p in self.company_indicators):
+                    self.logger.debug(f"❌ Name matches company_indicators: {contact['name']}")
+                    contact['name'] = None
+
+                # Reject city names used as person names
+                elif contact['name'] and self._is_city_name(contact['name']):
+                    self.logger.debug(f"❌ Name is a city name: {contact['name']}")
+                    contact['name'] = None
+
+                # Reject candidate's own first name appearing in greeting
+                elif contact.get('name') and contact.get('source'):
+                    candidate_first = contact['source'].split('@')[0].split('.')[0].split('_')[0].lower()
+                    if len(candidate_first) >= 3 and contact['name'].lower().startswith(candidate_first):
+                        self.logger.debug(f"❌ Name starts with candidate first name '{candidate_first}': {contact['name']}")
+                        contact['name'] = None
+
+            # ── COMPANY VALIDATION ───────────────────────────────────────────
+            if contact.get('company'):
+                company = contact['company'].strip()
+                company_lower = company.lower()
+
+                # Positive structural gate
+                if not self._is_valid_company_name(company):
+                    self.logger.debug(f"❌ Company fails structural gate: {company}")
+                    contact['company'] = None
+
+                # Reject: phone number embedded in company (e.g. "Desk : 609-998-5909")
+                elif re.search(r':\s*\d{3}', company) or re.search(r'\d{3}[-.\s]\d{3}[-.\s]\d{4}', company):
+                    self.logger.debug(f"❌ Company contains phone number: {company}")
+                    contact['company'] = None
+
+                # Reject: very short abbreviations without suffix (e.g. "Sr", "Sr.", "Mr")
+                elif len(company.rstrip('.')) <= 3 and not any(s in company_lower for s in ['inc', 'llc', 'ltd', 'co']):
+                    self.logger.debug(f"❌ Company too short (abbreviation): {company}")
+                    contact['company'] = None
+
+                # Reject: requisition/job-ID patterns like "AI-25237)" or "(REQ-123)"
+                elif re.search(r'\b[A-Z]{1,4}-\d{3,}\)?$', company):
+                    self.logger.debug(f"❌ Company looks like a requisition ID: {company}")
+                    contact['company'] = None
+
+                # Reject: meeting platform names
+                elif any(platform in company_lower for platform in ['google meet', 'zoom meeting', 'microsoft teams', 'webex', 'go to meeting']):
+                    self.logger.debug(f"❌ Company is a meeting platform: {company}")
+                    contact['company'] = None
+
+                # Reject: day-of-week strings (Google Calendar invite fragments)
+                elif re.search(r'\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', company_lower):
+                    self.logger.debug(f"❌ Company contains day-of-week (calendar fragment): {company}")
+                    contact['company'] = None
+
+                # Reject: contains unicode bullets common in calendar invites
+                elif '⋅' in company or '•' in company:
+                    self.logger.debug(f"❌ Company contains calendar bullet character: {company}")
+                    contact['company'] = None
+
+            # ── LOCATION VALIDATION ──────────────────────────────────────────
+            if contact.get('location'):
+                location = contact['location'].strip()
+                location_lower = location.lower()
+
+                # Reject: meeting platforms / video call links
+                meeting_platforms = ['google meet', 'zoom', 'microsoft teams', 'webex', 'teams meeting', 'go to meeting', 'gotomeeting']
+                if any(p in location_lower for p in meeting_platforms):
+                    self.logger.debug(f"❌ Location is a meeting platform: {location}")
+                    contact['location'] = None
+
+                # Reject: timezone strings like "America/New_York"
+                elif re.match(r'^America/', location, re.IGNORECASE) or re.match(r'^(UTC|GMT)[+-]?\d*$', location, re.IGNORECASE):
+                    self.logger.debug(f"❌ Location is a timezone string: {location}")
+                    contact['location'] = None
+
+                # Reject: bare country/tech junk (standalone)
+                elif location_lower in {'us', 'usa', 'ai', 'ml', 'gemini', 'w2', 'c2c', '1099'}:
+                    self.logger.debug(f"❌ Location is a bare junk term: {location}")
+                    contact['location'] = None
+
+                # Reject: garbled text containing '@' or HTML-like fragments
+                elif '@' in location or re.search(r'<[^>]+>', location):
+                    self.logger.debug(f"❌ Location contains email/HTML fragment: {location}")
+                    contact['location'] = None
+
+            # ── DATA QUALITY SCORE ───────────────────────────────────────────
+            contact['data_quality_score'] = self._compute_data_quality_score(contact)
+
         except Exception as e:
             self.logger.error(f"Error validating contact: {str(e)}")
         
         return contact
-    
+
+    def _is_city_name(self, name: str) -> bool:
+        """Check if a name is actually a well-known city (should not be a person name)"""
+        try:
+            keyword_lists = self.filter_repo.get_keyword_lists()
+            common_cities = keyword_lists.get('ner_common_cities', [])
+            name_lower = name.lower().strip()
+            if name_lower in [c.lower() for c in common_cities]:
+                return True
+            major_cities = keyword_lists.get('us_major_cities', [])
+            if name_lower in [c.lower() for c in major_cities]:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _is_valid_person_name(self, name: str) -> bool:
+        """
+        Positive gate: name must structurally look like a human name.
+        Must be 2–4 words, each starting uppercase, no digits, reasonable length.
+        Returns True only if ALL conditions are met.
+        """
+        if not name:
+            return False
+        parts = name.strip().split()
+        # Must be 2–4 words (First Last | First M Last | First Middle Last)
+        if not (2 <= len(parts) <= 4):
+            return False
+        for word in parts:
+            # Allow hyphens and apostrophes (O'Brien, Smith-Jones)
+            clean = word.replace('-', '').replace("'", '').replace('.', '')
+            if not clean:
+                return False
+            # Each word must start uppercase
+            if not clean[0].isupper():
+                return False
+            # No digits (names don't have numbers)
+            if any(c.isdigit() for c in clean):
+                return False
+            # Must be mostly alpha
+            if not clean.isalpha():
+                return False
+        # Max word length 25 chars
+        if any(len(w) > 25 for w in parts):
+            return False
+        # Total length between 5 and 60 chars
+        if len(name) < 5 or len(name) > 60:
+            return False
+        return True
+
+    def _parse_signature_labels(self, text: str) -> dict:
+        """
+        Priority 0 extraction: parse labeled signature fields (Name:, Company:, Phone:, Title:).
+        These structured lines have near-100% precision vs NER guesswork.
+        Looks in the last 700 characters of the email body.
+        """
+        result = {'name': None, 'company': None, 'phone': None, 'title': None}
+        if not text:
+            return result
+
+        # Focus on signature block (last 700 chars)
+        sig = text[-700:] if len(text) > 700 else text
+
+        patterns = {
+            'name': (
+                r'(?:^|\n)[ \t]*(?:name|from)[ \t]*[:|\u2014\u2013][ \t]*'
+                r'([A-Z][a-z\'\-]+(?:[ \t]+[A-Z][a-z\'\-\.]{0,24}){1,3})'
+            ),
+            'company': (
+                r'(?:^|\n)[ \t]*(?:company|organization|org|employer|firm|corp|co\.)[ \t]*[:|\u2014\u2013][ \t]*'
+                r'(.{3,60}?)[ \t]*$'
+            ),
+            'phone': (
+                r'(?:^|\n)[ \t]*(?:phone|tel|mobile|cell|direct|office|desk|ph|ph\.)[ \t]*[:|\u2014\u2013][ \t]*'
+                r'(\+?[\d\s\(\)\.\-]{7,20})[ \t]*$'
+            ),
+            'title': (
+                r'(?:^|\n)[ \t]*(?:title|position|designation|role)[ \t]*[:|\u2014\u2013][ \t]*'
+                r'(.{3,80}?)[ \t]*$'
+            ),
+        }
+
+        for field, pattern in patterns.items():
+            m = re.search(pattern, sig, re.IGNORECASE | re.MULTILINE)
+            if m:
+                value = m.group(1).strip()
+                if value:
+                    result[field] = value
+                    self.logger.debug(f"✓ Signature label extracted {field}: {value}")
+
+        return result
+
+    def _is_valid_company_name(self, company: str, gliner_confidence: float = 0.0) -> bool:
+        """
+        Positive structural validation for company names.
+        A company must pass at least one structural check to be accepted.
+        """
+        if not company or len(company.strip()) < 2:
+            return False
+
+        co = company.strip()
+        co_lower = co.lower()
+
+        # Reject: single word that looks like a generic noun or title
+        if len(co.split()) == 1:
+            # Single-word companies only OK if they have a business suffix
+            has_suffix = any(co_lower.endswith(s) for s in [
+                'inc', 'llc', 'ltd', 'corp', 'co', '.io', '.ai', 'labs',
+            ])
+            if not has_suffix and len(co) <= 6:
+                return False  # Too short + single word = abbreviation/title
+
+        # Check 1: Has a known business suffix anywhere
+        biz_suffixes = [
+            ' inc', ' llc', ' corp', ' ltd', ' limited', ' co.',
+            ' technologies', ' solutions', ' systems', ' consulting',
+            ' services', ' group', ' partners', ' associates', ' ventures',
+            ' labs', ' studio', ' studios', ' agency', ' digital', ' global',
+            ' international', ' worldwide', ' enterprises', ' holdings',
+            ' networks', ' software', ' analytics', ' capital', ' management',
+            '.io', '.ai', '.com',
+        ]
+        if any(co_lower.endswith(s.strip()) or s in co_lower for s in biz_suffixes):
+            return True
+
+        # Check 2: High GLiNER confidence
+        if gliner_confidence >= 0.65:
+            return True
+
+        # Check 3: 2–5 words, each properly capitalized (standard company name)
+        parts = co.split()
+        if 2 <= len(parts) <= 5 and all(p[0].isupper() for p in parts if p and p[0].isalpha()):
+            return True
+
+        # Check 4: All-caps acronym company (IBM, AWS, etc.) 2–5 chars
+        if co.isupper() and 2 <= len(co) <= 5:
+            return True
+
+        return False
+
+    def _compute_data_quality_score(self, contact: dict) -> int:
+        """
+        Compute a 0–100 data quality score for this contact.
+        Higher is better. Used to flag low-confidence extractions.
+        """
+        score = 0
+        if contact.get('email'):        score += 20   # baseline
+        if contact.get('name'):         score += 30   # most important
+        if contact.get('company'):      score += 25   # second most important
+        if contact.get('location'):     score += 10
+        if contact.get('job_position'): score += 10
+        if contact.get('phone'):        score +=  5
+        return min(score, 100)
+
     def _extract_field(self, field: str, text: str, email_message=None, **kwargs) -> Optional[str]:
         """
         Extract a specific field using configured method chain
-        
+
         Args:
             field: Field name (name, email, phone, company, linkedin_id, location)
             text: Text to extract from
             email_message: Optional email message object
             **kwargs: Additional context (e.g., email for company extraction)
-            
+
         Returns:
             Extracted value or None
         """
