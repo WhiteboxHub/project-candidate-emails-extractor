@@ -20,7 +20,7 @@ extraction:
   enabled_methods:
     - regex      # Fast, basic pattern matching
     - spacy      # NER-based entity extraction
-    - gliner     # Modern zero-shot NER (UPDATED!)
+    # - gliner   # Disabled: slow transformers startup causes crash; SpaCy handles most cases
   
   # Strict Vendor/Recruiter Filtering (NEW)
   # If true, only extracts contacts with valid recruiter job titles or context

@@ -1,0 +1,66 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\sampa\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\sampa\OneDrive\Desktop\projects-wbl\email-extractor-bot
+configfile: pyproject.toml
+plugins: anyio-4.12.1
+collecting ... collected 24 items
+
+tests/test_signature_extraction.py::TestIntroSentenceExtractor::test_no_match_newsletter_body PASSED [  4%]
+tests/test_signature_extraction.py::TestIntroSentenceExtractor::test_pattern1_nityo_staffing_specialist PASSED [  8%]
+tests/test_signature_extraction.py::TestIntroSentenceExtractor::test_pattern1_sachin_nityo PASSED [ 12%]
+tests/test_signature_extraction.py::TestIntroSentenceExtractor::test_pattern2_recruiter_at_bayonesolutions PASSED [ 16%]
+tests/test_signature_extraction.py::TestIntroSentenceExtractor::test_pattern3_this_is_from PASSED [ 20%]
+tests/test_signature_extraction.py::TestIntroSentenceExtractor::test_pattern4_name_a_title_with PASSED [ 25%]
+tests/test_signature_extraction.py::TestSignatureInfoExtractor::test_allcaps_name_pipe_title PASSED [ 29%]
+tests/test_signature_extraction.py::TestSignatureInfoExtractor::test_junk_name_technical_background_rejected PASSED [ 33%]
+tests/test_signature_extraction.py::TestSignatureInfoExtractor::test_name_pipe_title_same_line FAILED [ 37%]
+tests/test_signature_extraction.py::TestSignatureInfoExtractor::test_standard_block_after_regards FAILED [ 41%]
+tests/test_signature_extraction.py::TestCleanJobPosition::test_meeting_title_returns_none PASSED [ 45%]
+tests/test_signature_extraction.py::TestCleanJobPosition::test_normal_position_unchanged PASSED [ 50%]
+tests/test_signature_extraction.py::TestCleanJobPosition::test_phone_screen_returns_none PASSED [ 54%]
+tests/test_signature_extraction.py::TestCleanJobPosition::test_strip_company_prefix PASSED [ 58%]
+tests/test_signature_extraction.py::TestCleanJobPosition::test_strip_pipe_location_suffix PASSED [ 62%]
+tests/test_signature_extraction.py::TestCleanJobPosition::test_strip_req_id_prefix PASSED [ 66%]
+tests/test_signature_extraction.py::TestFullPipelineRealEmails::test_maroof_company_not_title PASSED [ 70%]
+tests/test_signature_extraction.py::TestFullPipelineRealEmails::test_maroof_job_position_starts_with_A FAILED [ 75%]
+tests/test_signature_extraction.py::TestFullPipelineRealEmails::test_sachin_company_not_tech_stack PASSED [ 79%]
+tests/test_signature_extraction.py::TestFullPipelineRealEmails::test_sachin_job_position_clean PASSED [ 83%]
+tests/test_signature_extraction.py::TestFullPipelineRealEmails::test_sachin_name FAILED [ 87%]
+tests/test_signature_extraction.py::TestFullPipelineRealEmails::test_sachin_sender_job_title PASSED [ 91%]
+tests/test_signature_extraction.py::TestFullPipelineRealEmails::test_shailaja_name FAILED [ 95%]
+tests/test_signature_extraction.py::TestFullPipelineRealEmails::test_shailaja_sender_job_title FAILED [100%]
+
+================================== FAILURES ===================================
+__________ TestSignatureInfoExtractor.test_name_pipe_title_same_line __________
+tests\test_signature_extraction.py:192: in test_name_pipe_title_same_line
+    self.assertIsNotNone(result['name'], "Name should be extracted")
+E   AssertionError: unexpectedly None : Name should be extracted
+________ TestSignatureInfoExtractor.test_standard_block_after_regards _________
+tests\test_signature_extraction.py:225: in test_standard_block_after_regards
+    self.assertIn('Shailaja', name, f"Expected name to contain 'Shailaja', got: {name}")
+E   AssertionError: 'Shailaja' not found in '' : Expected name to contain 'Shailaja', got:
+______ TestFullPipelineRealEmails.test_maroof_job_position_starts_with_A ______
+tests\test_signature_extraction.py:514: in test_maroof_job_position_starts_with_A
+    self.assertFalse(pos.startswith('rtificial'),
+E   AssertionError: True is not false : Truncated 'A' bug still present! job_position='rtificial intelligence / machine learning engineer'
+_________________ TestFullPipelineRealEmails.test_sachin_name _________________
+tests\test_signature_extraction.py:423: in test_sachin_name
+    self.assertIn('Sachin', name,
+E   AssertionError: 'Sachin' not found in 'Job Type' : Expected name to contain 'Sachin', got: 'Job Type'
+________________ TestFullPipelineRealEmails.test_shailaja_name ________________
+tests\test_signature_extraction.py:531: in test_shailaja_name
+    self.assertFalse(name == '' or name is None,
+E   AssertionError: True is not false : Name is empty ù should be 'Deshetti Shailaja' or 'Shailaja Deshetti'
+__________ TestFullPipelineRealEmails.test_shailaja_sender_job_title __________
+tests\test_signature_extraction.py:548: in test_shailaja_sender_job_title
+    self.assertIn('recruiter', title,
+E   AssertionError: 'recruiter' not found in '' : Expected 'Trainee Recruiter' in sender_job_title, got: ''
+=========================== short test summary info ===========================
+FAILED tests/test_signature_extraction.py::TestSignatureInfoExtractor::test_name_pipe_title_same_line
+FAILED tests/test_signature_extraction.py::TestSignatureInfoExtractor::test_standard_block_after_regards
+FAILED tests/test_signature_extraction.py::TestFullPipelineRealEmails::test_maroof_job_position_starts_with_A
+FAILED tests/test_signature_extraction.py::TestFullPipelineRealEmails::test_sachin_name
+FAILED tests/test_signature_extraction.py::TestFullPipelineRealEmails::test_shailaja_name
+FAILED tests/test_signature_extraction.py::TestFullPipelineRealEmails::test_shailaja_sender_job_title
+======================== 6 failed, 18 passed in 4.37s =========================

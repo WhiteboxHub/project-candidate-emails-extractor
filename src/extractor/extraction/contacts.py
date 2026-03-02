@@ -237,28 +237,42 @@ class ContactExtractor:
                     'extraction_source': source  # Track where email came from
                 }
 
-                # Extract signature info (Name, Title, Company) for classification
+                # ── PRIORITY 0a: Intro-sentence extraction (highest confidence) ────
+                # Catches: "My name is X and I am a Recruiter at Nityo Infotech."
+                intro_info = {}
+                if self.spacy_extractor:
+                    intro_info = self.spacy_extractor.extract_intro_sentence(clean_body)
+
+                # ── Extract signature info (Name, Title, Company) ─────────────────
                 signature_info = {}
                 if self.spacy_extractor:
                     signature_info = self.spacy_extractor.extract_signature_info(clean_body)
-                
-                # GLiNER Fallback: If Spacy missed title (crucial for classification), try GLiNER
+
+                # Merge: intro_info wins over signature_info for title and company
+                merged_title = intro_info.get('title') or signature_info.get('title')
+                merged_company = intro_info.get('company') or signature_info.get('company')
+                merged_name = intro_info.get('name') or signature_info.get('name')
+                # Write merged results back so downstream code sees them
+                signature_info['title'] = merged_title
+                signature_info['company'] = merged_company
+                # intro_info name WINS over signature_info name (intro sentence = highest confidence)
+                if merged_name:
+                    signature_info['name'] = merged_name
+
+                # GLiNER Fallback: If still missing title (crucial for classification), try GLiNER
                 if not signature_info.get('title') and self.gliner_extractor:
                     try:
-                        # Extract entities (GLiNER handles signature block extraction internally)
                         gliner_entities = self.gliner_extractor.extract_entities(clean_body)
                         if gliner_entities.get('job_title'):
                             signature_info['title'] = gliner_entities['job_title']
                             self.logger.debug(f"GLiNER rescued title: {signature_info['title']}")
-                        
-                        # Also enhance name/company if missing
                         if not signature_info.get('name') and gliner_entities.get('name'):
                             signature_info['name'] = gliner_entities['name']
                         if not signature_info.get('company') and gliner_entities.get('company'):
                             signature_info['company'] = gliner_entities['company']
                     except Exception as e:
                         self.logger.warning(f"GLiNER fallback failed: {e}")
-                
+
                 # Use vendor info from span if available
                 if vendor_info.get('name'):
                     contact['name'] = vendor_info['name']
@@ -305,15 +319,20 @@ class ContactExtractor:
                 if linkedin_raw and self._is_valid_linkedin_id(linkedin_raw):
                     contact['linkedin_id'] = linkedin_raw
                 
-                # Extract company if not from span
+                # Extract company — priority: intro-sentence > signature > SpaCy/regex field
+                if not contact['company'] and signature_info.get('company'):
+                    contact['company'] = signature_info['company']
+                    self.logger.debug(f"✓ Company from intro/signature: {contact['company']}")
+
                 if not contact['company']:
-                    contact['company'] = self._extract_field('company', clean_body, email_message, 
+                    contact['company'] = self._extract_field('company', clean_body, email_message,
                                                              email=contact['email'])
-                
-                # Fallback: Extract company from email domain if still null
-                if not contact['company'] and contact['email']:
-                    contact['company'] = self._extract_company_from_email(contact['email'])
-                
+
+                # NOTE: Domain-company fallback deliberately removed.
+                # Deriving company from email domain (e.g. "Staffingpros") returns
+                # the vendor agency, not the actual client employer. None is a more
+                # honest value than a wrong company name.
+
                 # CRITICAL FIX: Extract location from SUBJECT FIRST, then body
                 # This ensures we capture locations like "Charlotte, NC" from subject lines
                 location_from_subject = None
@@ -379,16 +398,31 @@ class ContactExtractor:
                 if contact['company']:
                     contact['company'] = contact['company'].strip()
                 
-                # Extract job position
-                # Pass subject line for better position extraction
-                if not contact['job_position']: # Only extract if not already extracted from subject
-                    contact['job_position'] = self._extract_field('job_position', clean_body, email_message, subject=subject)
-                
-                # If still no position and it's a junk/encrypted body, try a last-ditch attempt on subject ONLY
-                # This block is now mostly redundant due to the new encrypted/junk body handling above,
-                # but kept for any edge cases where the above might not catch it.
-                if not contact['job_position'] and is_junk_body:
+                # ── SUBJECT-FIRST position extraction ────────────────────────
+                # Subject lines (e.g. "Urgent || AI Engineer || Dallas TX") are
+                # far cleaner signals than body text.  Try subject FIRST, then
+                # fall back to body.
+                if not contact['job_position'] and subject:
+                    contact['job_position'] = self._extract_field(
+                        'job_position', subject, email_message=email_message, subject=subject
+                    )
+                    if contact['job_position']:
+                        self.logger.debug(f"✓ Position from subject (primary): {contact['job_position']}")
+
+                # Fall back to body if subject gave nothing
+                if not contact['job_position']:
+                    contact['job_position'] = self._extract_field(
+                        'job_position', clean_body, email_message, subject=subject
+                    )
+
+                # Last-ditch attempt for junk / encrypted bodies
+                if not contact['job_position'] and is_junk_body and subject:
                     contact['job_position'] = self._extract_field('job_position', subject, email_message)
+
+                # ── POST-CLEAN job_position ───────────────────────────────────────
+                # Remove company-name prefix: "Nustar Technologies - AI Engineer" → "AI Engineer"
+                if contact.get('job_position'):
+                    contact['job_position'] = self._clean_job_position(contact['job_position'])
                 
                 # If body is encrypted, many body-based extractions will fail. 
                 # Use subject for location/company/position as much as possible.
@@ -435,13 +469,14 @@ class ContactExtractor:
                 
                         contact['company'] = None
                 
-                # CLASSIFY RECRUITER STATUS (ML/Heuristic)
-                # Use title from signature if available
-                sender_title = signature_info.get('title')
-                
-                # Run classification
-                is_recruiter, score, reason = self.recruiter_classifier.is_recruiter(sender_title, clean_body)
-                
+                # CLASSIFY RECRUITER STATUS
+                # sender_job_title — prefer intro-sentence title, fallback to signature title
+                sender_title = intro_info.get('title') or signature_info.get('title')
+                contact_email = contact.get('email') or ''
+                is_recruiter, score, reason = self.recruiter_classifier.is_recruiter(
+                    sender_title, clean_body, sender_email=contact_email
+                )
+
                 # Store classification results
                 contact['is_recruiter'] = is_recruiter
                 contact['recruiter_score'] = score
@@ -503,17 +538,21 @@ class ContactExtractor:
                     self.logger.debug(f"❌ Name fails format gate: {contact['name']}")
                     contact['name'] = None
 
-                # Reject names that match known junk patterns from CSV
-                elif any(junk in name_lower for junk in self.junk_name_patterns):
+                # Reject names that match known junk patterns from CSV (whole-word match only)
+                elif any(re.search(r'\b' + re.escape(junk) + r'\b', name_lower)
+                         for junk in self.junk_name_patterns):
                     self.logger.debug(f"❌ Name matches junk_name_patterns: {contact['name']}")
                     contact['name'] = None
 
                 # Reject names that match greeting_patterns or company_indicators
-                elif any(p in name_lower for p in self.greeting_patterns):
+                # CRITICAL: whole-word only — "hi" must NOT match inside "sachin"
+                elif any(re.search(r'\b' + re.escape(p.lower()) + r'\b', name_lower)
+                         for p in self.greeting_patterns):
                     self.logger.debug(f"❌ Name matches greeting_patterns: {contact['name']}")
                     contact['name'] = None
 
-                elif any(p in name_lower for p in self.company_indicators):
+                elif any(re.search(r'\b' + re.escape(p.lower()) + r'\b', name_lower)
+                         for p in self.company_indicators):
                     self.logger.debug(f"❌ Name matches company_indicators: {contact['name']}")
                     contact['name'] = None
 
@@ -603,8 +642,76 @@ class ContactExtractor:
         
         return contact
 
+    def _clean_job_position(self, position: str) -> Optional[str]:
+        """
+        Post-process job_position to remove common pollution patterns:
+          - Company-name prefix:  "Nustar Technologies - AI Engineer"  → "AI Engineer"
+          - Pipe/location suffix: "ML Engineer||Richardson, TX"        → "ML Engineer"
+          - Req-ID prefix:        "326632 - Data Scientist"            → "Data Scientist"
+          - Meeting titles:       "PM PST For Sr AI Engineer"          → None
+        """
+        if not position:
+            return position
+
+        p = position.strip()
+
+        # 0. Reject positions that are all-lowercase with 2+ words (raw body fragments)
+        words_check = p.split()
+        if len(words_check) >= 2 and p == p.lower() and not any(c.isdigit() for c in p):
+            # Could be valid if it's just a short simple title
+            if len(words_check) > 4:
+                self.logger.debug(f"❌ job_position all-lowercase fragment: {p}")
+                return None
+            p = p.title()
+
+        # 0b. Detect HTML-encoding truncation: starts with lowercase after stripping
+        #     e.g. "rtificial Intelligence / Machine Learning Engineer"
+        #     This means an HTML markup ate the first character ("A" from <a>Artificial)
+        if p and p[0].islower():
+            self.logger.debug(f"⚠ job_position starts with lowercase — likely truncated by HTML: {p[:40]}")
+            p = p[0].upper() + p[1:]  # best-effort fix: capitalize first char
+
+
+        if '||' in p:
+            p = p.split('||')[0].strip()
+
+        # 2. Strip req-ID prefix: "326632 - " or "AI-25237 - "
+        p = re.sub(r'^[A-Z0-9\-]{3,10}\s*-\s+', '', p).strip()
+
+        # 3. Strip company-name prefix: "Nustar Technologies - AI/ML Engineer"
+        # Heuristic: if left side has no role words but right side does, keep right side
+        if ' - ' in p:
+            left, right = p.split(' - ', 1)
+            left, right = left.strip(), right.strip()
+            role_words = {
+                'engineer', 'developer', 'architect', 'analyst', 'scientist', 'manager',
+                'consultant', 'specialist', 'lead', 'director', 'recruiter', 'designer',
+                'administrator', 'coordinator', 'advisor', 'associate', 'intern'
+            }
+            left_has_role = any(rw in left.lower() for rw in role_words)
+            right_has_role = any(rw in right.lower() for rw in role_words)
+            if not left_has_role and right_has_role and len(left.split()) <= 5:
+                p = right.strip()
+
+        # 4. Reject pure meeting / calendar titles
+        meeting_patterns = [
+            r'^\d+:\d+\s*(AM|PM)',
+            r'^PM\s+[A-Z]{2,3}\s+For\s+',
+            r'^Phone\s+(Screen|Call|Interview)',
+            r'^Interview\s+(with|for)',
+            r'^Zoom\s+',
+            r'^Google\s+Meet',
+        ]
+        for mp in meeting_patterns:
+            if re.match(mp, p, re.IGNORECASE):
+                self.logger.debug(f"❌ job_position rejected as meeting title: {p}")
+                return None
+
+        return p if p else None
+
     def _is_city_name(self, name: str) -> bool:
         """Check if a name is actually a well-known city (should not be a person name)"""
+
         try:
             keyword_lists = self.filter_repo.get_keyword_lists()
             common_cities = keyword_lists.get('ner_common_cities', [])
@@ -621,35 +728,67 @@ class ContactExtractor:
     def _is_valid_person_name(self, name: str) -> bool:
         """
         Positive gate: name must structurally look like a human name.
-        Must be 2–4 words, each starting uppercase, no digits, reasonable length.
-        Returns True only if ALL conditions are met.
+        Normalizes casing before checking so ALL-CAPS / all-lowercase headers
+        are handled correctly.  Returns True only if ALL conditions pass.
         """
         if not name:
             return False
-        parts = name.strip().split()
-        # Must be 2–4 words (First Last | First M Last | First Middle Last)
+
+        # ── Normalize casing BEFORE checking ─────────────────────────────────
+        # "JOHN SMITH" → "John Smith", "john smith" → "John Smith"
+        name_normalized = name.strip()
+        if name_normalized.isupper() or name_normalized.islower():
+            name_normalized = name_normalized.title()
+
+        parts = name_normalized.split()
+        # Must be 2–4 words (First Last | First M. Last | First Middle Last)
         if not (2 <= len(parts) <= 4):
             return False
+
         for word in parts:
             # Allow hyphens and apostrophes (O'Brien, Smith-Jones)
             clean = word.replace('-', '').replace("'", '').replace('.', '')
             if not clean:
                 return False
-            # Each word must start uppercase
+            # Each word must start uppercase (after our normalization)
             if not clean[0].isupper():
                 return False
-            # No digits (names don't have numbers)
+            # No digits
             if any(c.isdigit() for c in clean):
                 return False
             # Must be mostly alpha
             if not clean.isalpha():
                 return False
+
         # Max word length 25 chars
         if any(len(w) > 25 for w in parts):
             return False
-        # Total length between 5 and 60 chars
-        if len(name) < 5 or len(name) > 60:
+        # Total length 5–60 chars
+        if len(name_normalized) < 5 or len(name_normalized) > 60:
             return False
+
+        # ── Block junk_name_patterns (new CSV category) ──────────────────────
+        # Single-word role/noun identifiers that are never personal names.
+        name_lower = name_normalized.lower()
+        try:
+            keyword_lists = self.filter_repo.get_keyword_lists()
+            junk_name_words = {kw.strip().lower() for kw in keyword_lists.get('junk_name_patterns', [])}
+            # Reject if ANY individual word of the name is a junk noun
+            if any(p.lower() in junk_name_words for p in parts):
+                self.logger.debug(f"⊘ Name rejected by junk_name_patterns: {name_normalized}")
+                return False
+        except Exception:
+            pass
+
+        # ── Cross-check against city lists ───────────────────────────────────
+        if self._is_city_name(name_lower):
+            self.logger.debug(f"⊘ Name rejected as city: {name_normalized}")
+            return False
+        # Also reject if the first word alone is a known city (e.g. "Houston Smith")
+        if len(parts) >= 1 and self._is_city_name(parts[0].lower()):
+            self.logger.debug(f"⊘ Name rejected: first word is city: {parts[0]}")
+            return False
+
         return True
 
     def _parse_signature_labels(self, text: str) -> dict:
@@ -1009,17 +1148,23 @@ class ContactExtractor:
             return False
         
         name_lower = name.lower().strip()
-        
+
         # Filter common greetings and invalid patterns (loaded from CSV)
+        # CRITICAL: use whole-word matching — substring "hi" must NOT match "sachin"
         for pattern in self.greeting_patterns:
-            if pattern in name_lower or name_lower.startswith(pattern):
+            pattern_lower = pattern.lower()
+            # Use word boundary check: pattern must be a standalone word or phrase
+            if re.search(r'\b' + re.escape(pattern_lower) + r'\b', name_lower):
                 self.logger.info(f"✗ Rejected greeting/generic name: {name}")
                 return True
-        
+
         # Reject if name looks like a company/team name (loaded from CSV)
-        if any(indicator in name_lower for indicator in self.company_indicators):
-            self.logger.info(f"✗ Rejected company/team name: {name}")
-            return True
+        # Also use whole-word matching to avoid false positives
+        for indicator in self.company_indicators:
+            ind_lower = indicator.lower()
+            if re.search(r'\b' + re.escape(ind_lower) + r'\b', name_lower):
+                self.logger.info(f"✗ Rejected company/team name: {name}")
+                return True
         
         # Check against email local part
         email_local = source_email.split('@')[0].lower()

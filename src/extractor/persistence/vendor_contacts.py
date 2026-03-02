@@ -124,11 +124,33 @@ class VendorUtil:
         seen_keys: set = set()
 
         for contact in contacts:
+            # Gate 1: minimum field quality (email/linkedin, sane name format)
             if not self._is_valid_contact(contact):
                 result["contacts_skipped"] += 1
+                self.logger.debug(
+                    "Skipped contact — failed quality gate: email=%s name=%s",
+                    contact.get("email"), contact.get("name")
+                )
                 continue
+
+            # Gate 2: not the candidate themselves / not a blocked domain
             if not self._is_vendor_recruiter_contact(contact):
                 result["contacts_skipped"] += 1
+                self.logger.debug(
+                    "Skipped contact — blocked domain or self-email: %s",
+                    contact.get("email")
+                )
+                continue
+
+            # Gate 3: classification must say recruiter
+            if not contact.get("is_recruiter", False):
+                result["contacts_skipped"] += 1
+                self.logger.info(
+                    "Skipped non-recruiter: email=%s reason=%s score=%.2f",
+                    contact.get("email"),
+                    contact.get("recruiter_reason", "unknown"),
+                    contact.get("recruiter_score", 0.0),
+                )
                 continue
 
             email_key = (contact.get("email") or "").strip().lower()

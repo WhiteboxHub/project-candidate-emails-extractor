@@ -18,7 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # CSV configuration
-CSV_FILE = Path(__file__).parent / "keywords.csv"
+CSV_FILE = Path(__file__).parent.parent / "src" / "keywords.csv"
 CSV_COLUMNS = [
     'id', 'category', 'source', 'keywords', 'match_type',
     'action', 'priority', 'context', 'is_active',

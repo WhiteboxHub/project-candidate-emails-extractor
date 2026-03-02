@@ -16,25 +16,27 @@ class FilterRepository:
         self._filters_by_priority = None
         
     def load_filters(self) -> bool:
-        """Load filters from CSV first, fallback to API if CSV not available"""
-        # Try CSV first (project root preferred)
-        project_root_csv = Path(__file__).resolve().parents[3] / "keywords.csv"
-        legacy_src_csv = Path(__file__).resolve().parents[2] / "keywords.csv"
+        """Load filters from src/keywords.csv, fallback to API if not available.
 
-        csv_path = project_root_csv if project_root_csv.exists() else legacy_src_csv
+        The canonical CSV location is always:
+            <repo-root>/src/keywords.csv
+        which is 3 directory levels above this file:
+            src/extractor/filtering/repository.py  →  parents[2] = src/
+        """
+        # Canonical path: always src/keywords.csv (relative to this file)
+        src_csv = Path(__file__).resolve().parents[2] / "keywords.csv"
 
-        if csv_path.exists():
+        if src_csv.exists():
             try:
-                return self._load_from_csv(csv_path)
+                return self._load_from_csv(src_csv)
             except Exception as e:
-                self.logger.warning(f"Failed to load from CSV: {str(e)}, falling back to database")
+                self.logger.warning(f"Failed to load from CSV ({src_csv}): {str(e)}, falling back to database")
         else:
-            self.logger.info(
-                "CSV file not found at %s (or legacy %s), loading from database",
-                project_root_csv,
-                legacy_src_csv,
+            self.logger.error(
+                "keywords.csv not found at expected path: %s — falling back to database",
+                src_csv,
             )
-        
+
         # Fallback to database API
         return self._load_from_database()
     

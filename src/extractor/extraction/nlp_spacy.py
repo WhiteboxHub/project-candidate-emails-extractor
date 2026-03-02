@@ -253,39 +253,127 @@ class SpacyNERExtractor:
             return {'name': None, 'company': None, 'location': None}
     
     def extract_name_from_signature(self, text: str) -> Optional[str]:
-        """Extract name from email signature patterns with better patterns"""
+        """Extract name from email signature patterns — covers mixed-case AND ALL-CAPS names."""
         try:
-            # Enhanced signature patterns
             patterns = [
-                # After greeting with newline
+                # After greeting with newline (mixed-case name)
                 r'(?:Thanks|Regards|Best|Sincerely|Warm regards|Kind regards|Cheers),?\s*[\r\n]+\s*([A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,2})\s*[\r\n]',
+                # ALL-CAPS name after greeting (e.g. "SATYAM KASHYAP")
+                r'(?:Thanks|Regards|Best|Sincerely|Warm regards|Kind regards|Cheers),?\s*[\r\n]+\s*([A-Z]{2,}(?:\s+[A-Z]{2,}){1,2})\s*[\r\n]',
                 # Name followed by title/company
-                r'([A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,2})\s*[\r\n]+(?:Senior|Lead|Director|Manager|Recruiter|VP|President)',
+                r'([A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,2})\s*[\r\n]+(?:Senior|Lead|Director|Manager|Recruiter|VP|President|Specialist|Executive|Consultant)',
+                # Name | Title on same line, take only the name part
+                r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\s*\|\s*(?:Senior|Lead|Director|Manager|Recruiter|VP|President|Specialist|Executive|Consultant|Talent|Technical|Associate)',
                 # Name followed by phone or email on next line
-                r'([A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,2})\s*[\r\n]+(?:Phone|Mobile|Email|Tel):',
-                # Simple pattern
+                r'([A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,2})\s*[\r\n]+(?:Phone|Mobile|Email|Tel|Work|Direct|Cell|Mob):',
+                # Simple pattern after regards
                 r'(?:Thanks|Regards|Best|Sincerely),?\s*[\r\n]+\s*([A-Z][a-z]+(?:[\s][A-Z][a-z]+){1,2})',
             ]
-            
+
             for pattern in patterns:
                 match = re.search(pattern, text, re.MULTILINE)
                 if match:
                     name = match.group(1).strip()
-                    # Validate
+                    # Title-case ALL-CAPS names
+                    if name.isupper():
+                        name = name.title()
                     words = name.split()
-                    if 2 <= len(words) <= 3 and not any(c.isdigit() for c in name):
+                    if 2 <= len(words) <= 4 and not any(c.isdigit() for c in name):
                         return name
-            
-            
+
             return None
         except Exception as e:
             self.logger.error(f"Error extracting name from signature: {str(e)}")
             return None
 
+    def extract_intro_sentence(self, text: str) -> Dict[str, Optional[str]]:
+        """
+        Extract recruiter name, title, and company from intro sentence patterns.
+
+        Covers the most common recruiter email templates:
+          - "My name is John Smith and I am a Staffing Specialist at Nityo Infotech."
+          - "I work as a Senior Recruiter at BayOne Solutions Inc."
+          - "This is Ravi from Siri Info Solutions Inc."
+          - "I'm [Name] and I am a Technical Recruiter at TechCorp."
+          - "I am John Smith, a Talent Acquisition Specialist with Empower Professionals."
+
+        Returns:
+            Dict with keys: name, title, company (all may be None)
+        """
+        result = {'name': None, 'title': None, 'company': None}
+        try:
+            # Work only on first 800 chars where intro sentence appears
+            intro_text = text[:800]
+
+            # Pattern 1: "My name is [Name] and I (am|work as) a [Title] at/with [Company]"
+            p1 = re.search(
+                r'[Mm]y name is ([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})'
+                r'(?:\s+and\s+I(?:\'m|\s+am|\s+work(?:ing)?\s+as?)\s+(?:a|an)\s+'
+                r'([A-Za-z\s\-/]{3,45}?))?'
+                r'\s+(?:at|with|for)\s+([A-Z][A-Za-z0-9\s&.,\-]{2,60}?)(?:\.|,|\n|$)',
+                intro_text
+            )
+            if p1:
+                result['name'] = p1.group(1).strip()
+                if p1.group(2):
+                    result['title'] = p1.group(2).strip().rstrip('.,')
+                result['company'] = p1.group(3).strip().rstrip('.,')
+                self.logger.debug(f"✓ Intro P1: name={result['name']}, title={result['title']}, company={result['company']}")
+                return result
+
+            # Pattern 2: "I am/I'm a [Title] at/with [Company]" (no name in this pattern)
+            p2 = re.search(
+                r'I(?:\'m|\s+am|\s+work(?:ing)?\s+as?)\s+(?:a|an)\s+'
+                r'([A-Za-z\s\-/]{3,45}?)'
+                r'\s+(?:at|with|for)\s+([A-Z][A-Za-z0-9\s&.,\-]{2,60}?)(?:\.|,|\n|$)',
+                intro_text, re.IGNORECASE
+            )
+            if p2:
+                result['title'] = p2.group(1).strip().rstrip('.,')
+                result['company'] = p2.group(2).strip().rstrip('.,')
+                self.logger.debug(f"✓ Intro P2: title={result['title']}, company={result['company']}")
+                return result
+
+            # Pattern 3: "This is [Name] from [Company]"
+            p3 = re.search(
+                r'[Tt]his is ([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})'
+                r'\s+from\s+([A-Z][A-Za-z0-9\s&.,\-]{2,60}?)(?:\.|,|\n|$)',
+                intro_text
+            )
+            if p3:
+                result['name'] = p3.group(1).strip()
+                result['company'] = p3.group(2).strip().rstrip('.,')
+                self.logger.debug(f"✓ Intro P3: name={result['name']}, company={result['company']}")
+                return result
+
+            # Pattern 4: "[Name], a [Title] (at|with) [Company]"
+            p4 = re.search(
+                r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}),\s+(?:a|an)\s+'
+                r'([A-Za-z\s\-/]{3,45}?)'
+                r'\s+(?:at|with|for)\s+([A-Z][A-Za-z0-9\s&.,\-]{2,60}?)(?:\.|,|\n|$)',
+                intro_text
+            )
+            if p4:
+                result['name'] = p4.group(1).strip()
+                result['title'] = p4.group(2).strip().rstrip('.,')
+                result['company'] = p4.group(3).strip().rstrip('.,')
+                self.logger.debug(f"✓ Intro P4: name={result['name']}, title={result['title']}, company={result['company']}")
+                return result
+
+        except Exception as e:
+            self.logger.error(f"Error in extract_intro_sentence: {str(e)}")
+
+        return result
+
     def extract_signature_info(self, text: str) -> Dict[str, Optional[str]]:
         """
         Extract structured info from email signature (Name, Title, Company).
-        
+
+        Handles:
+        - Standard block: Name / Title / Company on separate lines after "Regards,"
+        - Same-line: "Name | Title" or "Name - Title" patterns
+        - ALL-CAPS names like "SATYAM KASHYAP | TALENT SCOUT"
+
         Returns:
             Dict with keys: name, title, company, phone, email
         """
@@ -297,59 +385,152 @@ class SpacyNERExtractor:
             'email': None
         }
         try:
-            # 1. Finds blocks that look like signatures (bottom of email, short lines)
             lines = text.split('\n')
-            
-            # Simple heuristic: Look at last 10 lines
-            sig_lines = lines[-15:] if len(lines) > 15 else lines
-            
-            # Find name line (usually starts with Thanks/Regards or is just a name)
-            name_idx = -1
-            
-            # Greeting patterns
-            greeting_pattern = r'^(?:Thanks|Regards|Best|Sincerely|Warm regards|Kind regards|Cheers),?\s*$'
-            
+            # Focus on last 20 lines where signatures live
+            sig_lines = lines[-20:] if len(lines) > 20 else lines
+
+            # ── Pass 1: Look for "Name | Title" or "Name - Title" on a SINGLE LINE ──
+            # Covers: "SATYAM KASHYAP | TALENT SCOUT" and "Sachin Sharma - Talent Acquisition"
+            name_title_pattern = re.compile(
+                r'^([A-Z][A-Za-z\-]+(?:\s+[A-Z][A-Za-z\-]+){1,3})\s*'
+                r'[\|–\-]\s*'
+                r'([A-Za-z][A-Za-z\s/\-]{3,50})$'
+            )
             for i, line in enumerate(sig_lines):
-                line = line.strip()
-                if not line:
+                line_s = line.strip()
+                # Also handle ALL-CAPS: convert to title-case for matching
+                line_check = line_s
+                if line_s.isupper() and len(line_s.split()) >= 2:
+                    line_check = line_s.title()
+
+                m = name_title_pattern.match(line_check)
+                if m:
+                    cand_name = m.group(1).strip()
+                    cand_title = m.group(2).strip()
+                    # Reject if name part looks like a job descriptor
+                    junk_starters = {'technical', 'senior', 'lead', 'associate', 'junior',
+                                     'must', 'phone', 'email', 'desk', 'direct', 'cell'}
+                    if cand_name.split()[0].lower() not in junk_starters:
+                        result['name'] = cand_name
+                        result['title'] = cand_title
+                        # Look for company in the next 3 lines
+                        for j in range(i + 1, min(i + 4, len(sig_lines))):
+                            next_line = sig_lines[j].strip()
+                            if next_line and self._is_valid_company_name(next_line):
+                                result['company'] = self._clean_company_name(next_line)
+                                break
+                        if result['name']:
+                            return result
+
+            # ── Pass 2: Standard block after greeting ───────────────────────────────
+            name_idx = -1
+            # Matches: Thanks, Regards, Best, Thanks & Regards, Best Wishes, etc.
+            greeting_pattern = (
+                r'^(?:Thanks(?:\s*[&+]\s*Regards)?|Regards|Best(?:\s+Wishes)?'
+                r'|Sincerely|Warm\s+regards|Kind\s+regards|Cheers'
+                r'|Looking\s+forward|Thank\s+you),?\s*$'
+            )
+
+            for i, line in enumerate(sig_lines):
+                line_s = line.strip()
+                if not line_s:
                     continue
-                    
-                # Check if this line is a greeting
-                if re.match(greeting_pattern, line, re.IGNORECASE):
-                    # Next non-empty line is likely the name
+                if re.match(greeting_pattern, line_s, re.IGNORECASE):
                     for j in range(i + 1, len(sig_lines)):
                         potential_name = sig_lines[j].strip()
-                        if potential_name:
-                            # Validate name
-                            words = potential_name.split()
-                            if 2 <= len(words) <= 4 and not any(c.isdigit() for c in potential_name):
-                                result['name'] = potential_name
-                                name_idx = j
-                                break
+                        if not potential_name:
+                            continue
+                        # Strip (Nickname) suffix e.g. "Deshetti Shailaja\n(Tessa)"
+                        potential_name_clean = re.sub(r'\s*\([^)]{1,20}\)\s*$', '', potential_name).strip()
+                        # Accept mixed-case or ALL-CAPS names
+                        display = potential_name_clean.title() if potential_name_clean.isupper() else potential_name_clean
+                        words = display.split()
+                        if 2 <= len(words) <= 4 and not any(c.isdigit() for c in display):
+                            result['name'] = display
+                            name_idx = j
+                            break
                     if result['name']:
                         break
-            
-            # If name found, look for title/company in subsequent lines
-            if name_idx != -1 and name_idx + 1 < len(sig_lines):
-                # Next line is often Title
-                potential_title = sig_lines[name_idx + 1].strip()
-                if potential_title and len(potential_title.split()) <= 6:
-                     # Basic validation: Shouldn't be a phone number or email
-                    if not re.search(r'\d', potential_title) and '@' not in potential_title:
+
+            if name_idx != -1:
+                # Next non-empty line = title
+                for k in range(name_idx + 1, min(name_idx + 4, len(sig_lines))):
+                    potential_title = sig_lines[k].strip()
+                    if not potential_title:
+                        continue
+                    # Must look like a job title: short, no digits, no @
+                    if (len(potential_title.split()) <= 7
+                            and not re.search(r'\d', potential_title)
+                            and '@' not in potential_title
+                            and not potential_title.startswith('http')):
                         result['title'] = potential_title
-                
-                # Line after title is often Company
-                if name_idx + 2 < len(sig_lines):
-                    potential_company = sig_lines[name_idx + 2].strip()
-                    if potential_company and not result['company']:
-                        if self._is_valid_company_name(potential_company):
-                             result['company'] = self._clean_company_name(potential_company)
+                        name_idx = k  # advance so company search starts here
+                        break
+
+                # Next line after title = company
+                for k in range(name_idx + 1, min(name_idx + 4, len(sig_lines))):
+                    potential_company = sig_lines[k].strip()
+                    if potential_company and self._is_valid_company_name(potential_company):
+                        result['company'] = self._clean_company_name(potential_company)
+                        break
+
+            # ── Pass 3: No-greeting sig block ──────────────────────────────────────
+            # Catches signatures without "Regards," — scan last 8 lines for
+            # a capitalized 2-4 word name followed immediately by a job-title line.
+            if not result.get('name'):
+                # Recruiter title keywords for the adjacent-line check
+                title_kws = {'recruiter', 'acquisition', 'staffing', 'sourcer', 'hr',
+                             'talent', 'specialist', 'executive', 'consultant', 'manager',
+                             'director', 'trainee', 'lead', 'associate', 'coordinator',
+                             'generalist', 'partner', 'advisor', 'analyst'}
+                name_re = re.compile(r'^[A-Z][A-Za-z\-]+(?:\s+[A-Z][A-Za-z\-]+){1,3}$')
+                scan = sig_lines[-15:] if len(sig_lines) >= 15 else sig_lines
+                for idx, line in enumerate(scan[:-1]):  # not last line
+                    line_s = re.sub(r'\s*\([^)]{1,20}\)\s*$', '', line.strip()).strip()
+                    if not line_s or not name_re.match(line_s):
+                        continue
+                    # Must not look like a company or job description
+                    if any(kw in line_s.lower() for kw in
+                           {'inc', 'llc', 'corp', 'ltd', 'solutions', 'services',
+                            'technologies', 'systems', 'consulting', 'group',
+                            'recruitm', 'staffing', 'acquisition'}):
+                        continue
+                    # Look ahead up to 3 lines (skip blank lines and (Nickname) lines)
+                    title_line = None
+                    title_offset = None
+                    for fw in range(1, min(4, len(scan) - idx)):
+                        fw_line = scan[idx + fw].strip()
+                        if not fw_line:
+                            continue
+                        # Skip parenthetical nickname lines like "(Tessa)"
+                        if re.match(r'^\([^)]{1,30}\)$', fw_line):
+                            continue
+                        # Check if this line looks like a job title
+                        if any(kw in fw_line.lower() for kw in title_kws):
+                            title_line = fw_line
+                            title_offset = idx + fw
+                            break
+                        else:
+                            break  # Non-matching, non-skip line — stop looking
+
+                    if title_line:
+                        result['name'] = line_s
+                        result['title'] = title_line
+                        # Look for company in the next line after title
+                        if title_offset is not None and title_offset + 1 < len(scan):
+                            co_line = scan[title_offset + 1].strip()
+                            if co_line and self._is_valid_company_name(co_line):
+                                result['company'] = self._clean_company_name(co_line)
+                        self.logger.debug(f"✓ Pass 3 sig: name={result['name']}, title={result['title']}")
+                        break
 
             return result
+
         except Exception as e:
             self.logger.error(f"Error parsing signature info: {e}")
             return result
-    
+
+
     def extract_vendor_from_span(self, text: str) -> Dict[str, Optional[str]]:
         """Extract vendor name and company from HTML span tags or similar patterns
         

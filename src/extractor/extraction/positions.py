@@ -700,17 +700,28 @@ class PositionExtractor:
                     self.logger.debug(f"⊘ Rejected recruiter title: {position}")
                     return False
         
-        # NEW: Word count validation (2-8 words max)
-        # CRITICAL FIX: Allow 2-word positions if they contain core keywords
-        # This fixes "Gen AI" being rejected
+        # Word count validation: 2–6 words
+        # 2-word minimum prevents single-word noise; 6-word cap prevents
+        # sentence fragments (tightened from 8).
         words = position.split()
         word_count = len(words)
-        
+
         if word_count < 2:
             return False
-        
-        if word_count > 8:
+
+        if word_count > 6:
             return False
+
+        # Terminal suffix check: the LAST word (or second-to-last for
+        # "... Engineer II" / "... Manager Sr") must be a known job suffix.
+        # This eliminates greedy regex captures that end in prepositions etc.
+        if self.job_title_suffixes:
+            last_words = [words[-1].lower(), words[-2].lower() if len(words) >= 2 else ""]
+            if not any(w in self.job_title_suffixes for w in last_words):
+                # Allow if any core keyword is an exact match for the whole position
+                if not any(kw == position_lower for kw in self.core_keywords):
+                    self.logger.debug(f"⊘ Rejected (no terminal suffix): {position}")
+                    return False
         
         # NEW: Require at least one core keyword (from CSV)
         # For 2-word positions, this is CRITICAL to avoid false positives
