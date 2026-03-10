@@ -48,7 +48,7 @@ class JobPersistence:
             
         except Exception as e:
             self.logger.error(f"Failed to fetch raw jobs: {e}")
-            return []
+            return [], 0
 
     def save_valid_job(self, job_data: Dict) -> bool:
         """
@@ -60,6 +60,23 @@ class JobPersistence:
             return True
         except Exception as e:
             self.logger.error(f"Failed to save valid job: {e}")
+            return False
+
+    def save_email_positions_bulk(self, positions: List[Dict]) -> bool:
+        """
+        Save jobs that failed NER validation into the email_positions table via bulk API.
+        Endpoint: /api/email-positions/bulk
+        """
+        if not positions:
+            return True
+            
+        try:
+            self.logger.info(f"Bulk inserting {len(positions)} records into email_positions")
+            payload = {"positions": positions}
+            self.api_client.post("/api/email-positions/bulk", payload)
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed bulk insert into email_positions: {e}")
             return False
 
     def update_raw_status(self, raw_id: int, status: str) -> bool:

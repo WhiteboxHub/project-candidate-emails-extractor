@@ -85,6 +85,8 @@ class LLMJobClassifyOrchestrator:
             "total": 0,
             "classified_valid": 0,
             "finalized_after_ner": 0,
+            "ner_fallback": 0,
+            "ner_skipped_no_email": 0,
             "junk": 0,
             "errors": 0
         }
@@ -92,6 +94,7 @@ class LLMJobClassifyOrchestrator:
         records = {
             "valid": [],       # LLM said valid
             "finalized": [],   # Passed NER
+            "ner_fallback": [],# Failed NER but LLM valid
             "junk": []         # LLM said junk
         }
         
@@ -122,6 +125,7 @@ class LLMJobClassifyOrchestrator:
             # If after client-side filtering we have nothing to process, we must skip ahead
             # this happens if the API is ignoring the processing_status filter
             processed_in_batch = 0
+            batch_email_positions = []
             
             print(f"\nProcessing batch of {len(raw_jobs)} candidates (Current Skip: {current_skip})...")
             
@@ -252,24 +256,58 @@ class LLMJobClassifyOrchestrator:
                                 "llm_result": result,
                                 "finalized_data": ner_result['job_data']
                             })
+                            
+                            if not self.dry_run:
+                                save_success = self.persistence.save_valid_job(job_data)
+                                if save_success:
+                                    logger.info(f"       Saved to job_listing table with full metadata")
+                                    # 5. Mark as processed ONLY after successful save
+                                    status_success = self.persistence.update_raw_status(raw_id, "parsed")
+                                    if status_success:
+                                        logger.info(f"       Status marked as 'parsed'")
+                                else:
+                                    logger.error(f"       Failed to persist job. Status remains 'new'.")
+                            else:
+                                print(f"      [DRY RUN] Would save to job_listing table")
                         else:
                             logger.warning(f"       NER Finalization incomplete: {', '.join(ner_result['errors'])}")
-                        
-                        if not self.dry_run:
-                            save_success = self.persistence.save_valid_job(job_data)
-                            if save_success:
-                                logger.info(f"       Saved to job_listing table with full metadata")
-                                # 5. Mark as processed ONLY after successful save
-                                status_success = self.persistence.update_raw_status(raw_id, "parsed")
-                                if status_success:
-                                    logger.info(f"       Status marked as 'parsed'")
+                            stats["ner_fallback"] += 1
+                            
+                            # Prepare for email_positions fallback
+                            email_pos = {
+                                "candidate_id": raw_job.get('candidate_id'),
+                                "source": "email_bot_llm_local",
+                                "source_uid": job_data.get('source_uid'),
+                                "extractor_version": "llm-v1-ner-fallback",
+                                "title": job_data.get('title'),
+                                "company": job_data.get('company_name'),
+                                "location": job_data.get('location'),
+                                "zip": job_data.get('zip'),
+                                "description": job_data.get('description'),
+                                "contact_info": f"EMAIL: {job_data.get('contact_email', 'N/A')} | Phone: {job_data.get('contact_phone', 'N/A')}",
+                                "notes": f"NER Errors: {', '.join(ner_result['errors'])}",
+                                "payload": payload, # API likely expects a dict/json for payload column
+                                "error_message": ", ".join(ner_result['errors'])
+                            }
+                            
+                            # Store in fallback records
+                            records["ner_fallback"].append({
+                                "raw_job": raw_job,
+                                "llm_result": result,
+                                "email_position_data": email_pos
+                            })
+                            
+                            # Strict check: Email is mandatory for email_positions table
+                            contact_email = job_data.get('contact_email')
+                            if contact_email:
+                                batch_email_positions.append((raw_id, email_pos))
+                                if self.dry_run:
+                                    print(f"      [DRY RUN] Would save to email_positions table (NER Failed)")
                             else:
-                                logger.error(f"       Failed to persist job. Status remains 'new'.")
-                        else:
-                            print(f"      [DRY RUN] Would save to database with following metadata:")
-                            print(f"                Src UID: {job_data['source_uid']}")
-                            print(f"                URL    : {job_data['job_url']}")
-                            print(f"                Mode   : {job_data['employment_mode']}")
+                                logger.warning(f"       Skipping email_positions: No contact email found for ID {raw_id}")
+                                stats["ner_skipped_no_email"] += 1
+                                if not self.dry_run:
+                                    self.persistence.update_raw_status(raw_id, "parsed")
                     else:
                         # Even if junk, we mark as parsed so we don't pick it up again
                         if not self.dry_run:
@@ -289,6 +327,20 @@ class LLMJobClassifyOrchestrator:
                     logger.error(f" Error processing ID {raw_id}: {e}")
                     stats["errors"] += 1
                     continue
+
+            # Handle Bulk insert for email_positions (NER Failures)
+            if batch_email_positions:
+                if not self.dry_run:
+                    positions_to_save = [p[1] for p in batch_email_positions]
+                    bulk_success = self.persistence.save_email_positions_bulk(positions_to_save)
+                    if bulk_success:
+                        logger.info(f" Successfully bulk inserted {len(batch_email_positions)} records into email_positions")
+                        for raw_id, _ in batch_email_positions:
+                            self.persistence.update_raw_status(raw_id, "parsed")
+                    else:
+                        logger.error(f" Failed to bulk insert records into email_positions")
+                else:
+                    print(f" [DRY RUN] Would bulk insert {len(batch_email_positions)} records into email_positions")
             
             # Smart Pagination: Always move forward by the number of records we looked at
             # This ensures we don't get stuck on the same page of already-parsed records
@@ -313,6 +365,8 @@ class LLMJobClassifyOrchestrator:
         print(f" Total Processed     : {stats['total']}")
         print(f" Classified Valid    : {stats['classified_valid']}")
         print(f" Finalized after NER : {stats['finalized_after_ner']}")
+        print(f" NER Fallback Saved  : {stats['ner_fallback']}")
+        print(f" NER Skipped (No Email): {stats['ner_skipped_no_email']}")
         print(f" Filtered as Junk    : {stats['junk']}")
         print(f" Errors Encountered  : {stats['errors']}")
         print("="*60)
@@ -333,6 +387,8 @@ class LLMJobClassifyOrchestrator:
                     "total_processed": stats["total"],
                     "classified_valid": stats["classified_valid"],
                     "finalized_after_ner": stats["finalized_after_ner"],
+                    "ner_fallback_count": stats["ner_fallback"],
+                    "ner_skipped_no_email": stats["ner_skipped_no_email"],
                     "junk_count": stats["junk"],
                     "errors_encountered": stats["errors"],
                     "file_category": category,
@@ -354,7 +410,7 @@ class LLMJobClassifyOrchestrator:
     def _log_audit(self, raw_id: int, result: dict):
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         reasoning = result.get('reasoning', 'N/A').replace('\n', ' ')
-b-7        entry = (
+        entry = (
             f"{timestamp} | ID: {raw_id:6} | Label: {result['label']:10} | "
             f"Score: {result['score']:.2f} | Reasoning: {reasoning[:100]}...\n"
         )
