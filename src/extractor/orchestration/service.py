@@ -224,11 +224,15 @@ class EmailExtractionService:
                     total_contacts = save_result.get("contacts_inserted", 0)
                     total_positions = save_result.get("positions_inserted", 0)
                     total_extracts = save_result.get("extracts_inserted", 0)
+                    total_finalized = save_result.get("positions_finalized", 0)
+                    total_ner_fallback = save_result.get("ner_fallback_inserted", 0)
+                    
                     self.logger.info(
-                        "Bulk save complete: %d contacts, %d audit extracts inserted", # (silenced %d positions)
+                        "Bulk save complete: %d contacts, %d audit extracts, %d finalized, %d fallbacks",
                         total_contacts,
-                        # total_positions,
                         total_extracts,
+                        total_finalized,
+                        total_ner_fallback,
                     )
                 except Exception as save_error:
                     self.logger.error("Bulk save failed: %s", save_error, exc_info=True)
@@ -290,6 +294,8 @@ class EmailExtractionService:
                 total_failed,
                 total_emails_fetched,
                 total_found=total_found,
+                total_finalized=total_finalized,
+                total_ner_fallback=total_ner_fallback,
             )
             self._update_run_status(
                 status=overall_status,
@@ -335,6 +341,8 @@ class EmailExtractionService:
                 total_failed=total_failed,
                 total_emails_fetched=total_emails_fetched,
                 total_found=total_found,
+                total_finalized=0,
+                total_ner_fallback=0,
             )
             self._update_run_status(
                 status="failed",
@@ -380,6 +388,8 @@ class EmailExtractionService:
         total_failed: int,
         total_emails_fetched: int,
         total_found: int = 0,
+        total_finalized: int = 0,
+        total_ner_fallback: int = 0,
     ) -> Dict:
         candidates = execution_metadata.get("candidates", [])
         success_candidates = [
@@ -398,6 +408,8 @@ class EmailExtractionService:
             "total_emails_fetched": total_emails_fetched,
             "total_found_valid": total_found,
             "total_candidates_failed": total_failed,
+            "total_finalized": total_finalized,
+            "total_ner_fallback": total_ner_fallback,
             "successful_candidates": success_candidates,
             "failed_candidates": failed_candidates,
         }
@@ -472,6 +484,8 @@ class EmailExtractionService:
                 "total_non_vendor": total_non_vendor,
                 "total_found_valid": run_summary.get("total_found_valid", total_contacts_inserted + total_duplicates),
                 "positions_inserted": total_positions_inserted,
+                "positions_finalized": run_summary.get("total_finalized", 0),
+                "ner_fallback_inserted": run_summary.get("total_ner_fallback", 0),
             },
             "all_found_contacts": [
                 contact for c in candidates_data 

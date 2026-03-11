@@ -110,6 +110,25 @@ Log Activity
 
 ## 🚀 Usage
 
+### 📧 Email Extraction Workflow
+
+The main workflow for processing candidate inboxes end-to-end. It fetches emails, extracts recruiter/job info, and routes data based on validation results.
+
+```bash
+# Run the complete email extraction workflow
+python src/run_workflow.py --workflow-key email_extractor
+```
+
+**Features:**
+- **Incremental Processing**: Uses UID tracking to only process new messages.
+- **Multi-Inbox Support**: Fetches candidate credentials from the database and processes all active inboxes.
+- **NER-Based Routing**: 
+  - ✅ **Finalized**: Jobs passing strict NER validation are sent to `/api/positions/` (Job Listings).
+  - ⚠️ **Fallback**: Jobs failing NER but containing a valid email are sent to `/api/email-positions/bulk` (Email Positions).
+- **Audit Logs**: Generates categorized JSON results in `output/extraction_results/` and detailed summary reports in `output/reports/`.
+
+---
+
 ### 🤖 Job Classification & Validation
 
 This service uses LLMs (Groq or Local Ollama) to classify raw job descriptions into `valid_job` or `junk` with high precision.
@@ -264,6 +283,7 @@ docker run --env-file .env \
 | Script | Purpose |
 |--------|---------|
 | `service.py` | Main production service |
+| `run_workflow.py` | Universal workflow runner (e.g., email_extractor) |
 | `llm_based_classifier.py` | LLM-powered job classification engine |
 | `diagnose_account.py` | IMAP connection troubleshooting |
 | `sync_keywords_to_csv.py` | Sync database filters to CSV |

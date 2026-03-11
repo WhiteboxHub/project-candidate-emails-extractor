@@ -20,7 +20,9 @@ from ..filtering.repository import get_filter_repository
 from .duckdb_raw_listings import RawJobListingsDuckDB
 from datetime import datetime
 import sys
+import time
 from pathlib import Path
+from ..extraction.ner_validator import NERValidator
 
 # Auto-log generator (scripts/generate_duckdb_log.py)
 try:
@@ -127,6 +129,8 @@ class VendorUtil:
             "positions_skipped": 0,
             "extracts_inserted": 0,
             "extracts_skipped": 0,
+            "positions_finalized": 0,
+            "ner_fallback_inserted": 0,
         }
         if not contacts:
             self.logger.info("No contacts to save")
@@ -250,7 +254,170 @@ class VendorUtil:
         else:
             self.logger.info("No raw job listings produced from filtered vendor contacts")
 
+        # ── Step 6: Job Finalization (NER Path) ──────────────────────────────
+        # Route high-quality jobs to job_listings, and leftovers to email_positions
+        if truly_new_contacts:
+            self.logger.info("Running NER validation and routing for %d new contacts...", len(truly_new_contacts))
+            
+            ner_validator = NERValidator(use_gliner=False) # Use regex-based NER for speed in extractor
+            ner_fallback_positions = []
+            finalized_positions = []
+            
+            for contact in truly_new_contacts:
+                job_data = self._map_contact_to_job_data(contact)
+                
+                # Mock raw_job for validator
+                raw_job_mock = {
+                    "id": 0,
+                    "raw_description": contact.get("raw_body", ""),
+                    "raw_payload": contact
+                }
+                # Mock llm_result
+                llm_result_mock = {
+                    "extracted_title": contact.get("job_position", ""),
+                    "score": contact.get("data_quality_score", 0) / 100.0 if contact.get("data_quality_score") else 0.5
+                }
+                
+                val_result = ner_validator.validate_and_finalize(raw_job_mock, job_data, llm_result_mock)
+                
+                if val_result["is_finalized"]:
+                    try:
+                        self.logger.info("✓ Finalized job found (NER passed) -> /api/positions/")
+                        self.api_client.post("/api/positions/", val_result["job_data"])
+                        finalized_positions.append(val_result["job_data"])
+                        result["positions_finalized"] += 1
+                    except Exception as e:
+                        self.logger.error("Failed to save finalized job: %s", e)
+                else:
+                    # NER failed: Check for email, title, and company to fallback to email_positions
+                    # Use sanitized values from the validator (recovered titles/companies)
+                    final_data = val_result["job_data"]
+                    email = (final_data.get("contact_email") or "").strip()
+                    title = (final_data.get("title") or "").strip()
+                    company = (final_data.get("company_name") or "").strip()
+                    
+                    if email and title and company:
+                        fallback_entry = self._map_contact_to_email_pos(final_data)
+                        ner_fallback_positions.append(fallback_entry)
+                    else:
+                        missing = []
+                        if not email: missing.append("email")
+                        if not title: missing.append("title")
+                        if not company: missing.append("company")
+                        self.logger.warning("Skipping email_positions fallback - missing required fields: %s", ", ".join(missing))
+            
+            # Bulk save fallback positions (LLM and NER fallbacks both go here)
+            if ner_fallback_positions:
+                try:
+                    self.logger.info("Sending %d fallback records to /api/email-positions/bulk", len(ner_fallback_positions))
+                    self.api_client.post("/api/email-positions/bulk", {"positions": ner_fallback_positions})
+                    result["ner_fallback_inserted"] = len(ner_fallback_positions)
+                except Exception as e:
+                    self.logger.error("Failed to save bulk email positions: %s", e)
+
+            # ── Step 6c: Save Categorized JSON Result Files ──────────────────
+            self._save_categorized_results({
+                "finalized": finalized_positions,
+                "ner_fallback": ner_fallback_positions
+            }, result)
+
         return result
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Mapping Helpers for NER Path
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _map_contact_to_job_data(self, contact: Dict) -> Dict:
+        """Map contact dict to job_listings schema."""
+        def normalize_position_type(raw: str) -> str:
+            raw = (raw or '').lower().replace(' ', '_').replace('-', '_')
+            if any(x in raw for x in ['w2', 'w_2', 'contract_to_hire', 'c2h', 'contract to hire']):
+                return 'contract_to_hire' if 'hire' in raw else 'contract'
+            if any(x in raw for x in ['c2c', 'corp', '1099', 'independent']):
+                return 'contract'
+            if 'full' in raw:
+                return 'full_time'
+            if 'intern' in raw:
+                return 'internship'
+            if 'contract' in raw:
+                return 'contract'
+            return 'full_time'
+
+        def normalize_employment_mode(raw: str) -> str:
+            raw = (raw or '').lower()
+            if 'remote' in raw:
+                return 'remote'
+            if 'onsite' in raw or 'on-site' in raw or 'on site' in raw or 'office' in raw:
+                return 'onsite'
+            return 'hybrid'
+
+        return {
+            "title": (contact.get("job_position") or "")[:200],
+            "description": contact.get("raw_body"),
+            "company_name": (contact.get("company") or "")[:200],
+            "position_type": normalize_position_type(contact.get("employment_type") or ""),
+            "employment_mode": normalize_employment_mode(contact.get("work_mode") or ""),
+            "source": "email",
+            "source_uid": contact.get("extracted_from_uid") or "",
+            "source_job_id": str(contact.get('linkedin_id') or ''),
+            "created_from_raw_id": 0,
+            "location": contact.get("location") or "",
+            "zip": contact.get("zip_code") or "",
+            "country": "USA",
+            "contact_email": (contact.get("email") or "").strip(),
+            "contact_phone": contact.get("phone") or "",
+            "job_url": contact.get("job_url") or "",
+            "notes": f"Extracted from {contact.get('extraction_source')}",
+            "confidence_score": contact.get("data_quality_score", 0) / 100.0 if contact.get("data_quality_score") else 0.5,
+            "candidate_id": contact.get("candidate_id"),
+            "raw_payload": contact
+        }
+
+    def _map_contact_to_email_pos(self, job_data: Dict) -> Dict:
+        """Map sanitized job_data to email_positions schema (fallback)."""
+        return {
+            "title": job_data.get("title"),
+            "company": job_data.get("company_name"),
+            "location": job_data.get("location"),
+            "email": job_data.get("contact_email"),
+            "source": "email",
+            "candidate_id": job_data.get("candidate_id"),
+            "raw_payload": job_data.get("raw_payload")  # Original contact dict included in job_data mock
+        }
+
+    def _save_categorized_results(self, records: Dict[str, List[Dict]], stats: Dict):
+        """Save categorized records to JSON files for auditing, similar to LLM classifier."""
+        try:
+            project_root = Path(__file__).resolve().parents[3]
+            output_dir = project_root / "output" / "extraction_results"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            
+            for category, data in records.items():
+                if not data:
+                    continue
+                    
+                filename = output_dir / f"extraction_{category}_{timestamp}.json"
+                
+                result_package = {
+                    "summary": {
+                        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "total_extracted": len(records.get("finalized", [])) + len(records.get("ner_fallback", [])),
+                        "positions_finalized": stats.get("positions_finalized", 0),
+                        "ner_fallback_inserted": stats.get("ner_fallback_inserted", 0),
+                        "file_category": category,
+                        "file_record_count": len(data)
+                    },
+                    "records": data
+                }
+                
+                with open(filename, "w", encoding="utf-8") as f:
+                    json.dump(result_package, f, indent=2, ensure_ascii=False)
+                self.logger.info("Saved %s records to: %s", category, filename)
+                
+        except Exception as e:
+            self.logger.error("Failed to save categorized results: %s", e)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Bulk API insert — automation_contact_extracts
